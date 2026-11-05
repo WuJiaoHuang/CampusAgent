@@ -23,3 +23,4 @@ class Settings(BaseSettings):
     jwt_token: SecretStr = Field(default=SecretStr(""), repr=False)
     sqlite_path: Path = Path("data/campus_agent.sqlite3")
     chroma_path: Path = Path("data/chroma")
+    http_timeout_seconds: float = 10.0

@@ -5,8 +5,9 @@ CampusAgent 是独立的 Python 智能课程客服 Agent 项目。CampusTrain �
 与 HTTP API 使用其能力，负责 RAG、工具调用、多轮对话和业务操作编排。
 两个项目独立管理代码、依赖及 Git 历史，不复制 Java 实现。
 
-当前仅完成第一步：Python 工程初始化。首页可离线启动，无需模型密钥、JWT 或
-CampusTrain 在线。尚未实现 RAG、MCP 服务、LangGraph 工作流、业务接口调用和数据库操作。
+当前已完成工程初始化和第二步运行环境核查。首页可离线启动；第二步增加了异步
+CampusTrain Gateway 客户端和真实只读接口联调。尚未实现 RAG、MCP 服务、LangGraph
+工作流和数据库操作。
 
 ## 技术方案与目录
 
@@ -28,7 +29,7 @@ CampusAgent/
 │   ├── agent/__init__.py        # 后续工作流和记忆
 │   ├── rag/__init__.py          # 后续检索
 │   ├── mcp_server/__init__.py   # 后续 MCP Server
-│   └── campus_client/__init__.py # 后续 Java HTTP 客户端
+│   └── campus_client/            # 异步 Java Gateway HTTP 客户端
 ├── knowledge/.gitkeep          # 后续规则知识文件
 ├── evals/.gitkeep              # 后续效果评估
 └── tests/
@@ -88,6 +89,36 @@ uv --version
 不要用 `git add -f` 绕过忽略规则；向量数据应存放在默认 `data/` 或其他已忽略目录。
 当前仅预留路径，不创建或连接数据库。
 
+## CampusTrain 客户端与真实联调
+
+`CampusTrainClient` 使用 `httpx.AsyncClient`，默认关闭环境代理，支持 Gateway 地址、
+Bearer JWT、请求超时、JSON 响应 envelope（`code`/`message`/`data`）解析，并将网络错误、
+HTTP 错误和业务错误分别转换为客户端异常。当前只实现读取和登录能力：
+
+- `login`：`POST /auth/login`
+- `get_training_detail`：`GET /training/get/{trainingId}`
+- `get_training_catalog`：`GET /training/get/catalog/{trainingId}`
+- `get_my_enrollments`：`GET /enrollment/list/mine`
+- `get_training_progress`：`GET /learning/get/training-progress/{trainingId}`
+- `get_lesson_progress`：`GET /learning/get-progress/{lessonId}`
+- `get_chapter_progress`：`GET /learning/get/chapter-progress/{chapterId}`
+
+取消报名 `POST /enrollment/cancel/{enrollmentId}` 本阶段只完成源码核查，没有客户端方法，
+也没有执行真实取消操作。
+
+真实联调需要将凭据仅放在当前 PowerShell 进程环境中，不写入 `.env`、测试代码或日志：
+
+```powershell
+$env:CAMPUS_AGENT_INTEGRATION_GATEWAY = "http://192.168.10.102"
+$env:CAMPUS_AGENT_INTEGRATION_USERNAME = "<开发测试账号>"
+$env:CAMPUS_AGENT_INTEGRATION_PASSWORD = "<开发测试密码>"
+$env:CAMPUS_AGENT_INTEGRATION_TRAINING_ID = "16001"
+$env:CAMPUS_AGENT_INTEGRATION_LESSON_ID = "16001"
+uv run --locked pytest tests/test_integration.py -m integration -vv
+```
+
+未提供这些变量时，集成测试会明确跳过，不会使用 Mock 结果冒充真实联调。
+
 ## CampusTrain 只读勘查记录
 
 本次检查的本地项目为 `D:\HuaweiMoveData\Users\HW\Desktop\CampusTrain`，
@@ -135,5 +166,12 @@ git status --short
 | `uv run --locked ruff check .` | All checks passed |
 | Streamlit 实际服务 | 在本机临时端口启动；健康检查为 HTTP 200 / ok，首页为 HTTP 200 / HTML；验收后已关闭 |
 | Git | 忽略规则检查通过；暂存内容无密钥、数据库或缓存；空白检查通过 |
+
+第二步真实环境核查：VM `192.168.10.102` 的 Nginx、Nacos 和 8 个 Java 服务容器均处于运行状态，
+但 Docker health 状态显示为 unhealthy；本机 8080 未监听。通过真实 Gateway 登录后，使用已有有效
+报名数据的 `student01` 读取培训 `16001`、课时 `16001` 的详情、目录、我的报名、培训进度和课时进度，
+`tests/test_integration.py` 实际结果为 **1 passed**。未启动、停止、重建或修改任何 CampusTrain
+Docker 容器；未执行取消报名。对无有效报名的培训 `199001` 读取进度时真实返回 HTTP 403，客户端正确
+转换为 `CampusHttpError`，该结果没有被伪造成成功。
 
 CampusTrain 工作区在勘查前后均干净；本次未验证虚拟机、模型或业务接口。
