@@ -30,7 +30,11 @@ CampusAgent/
 │   ├── rag/__init__.py          # 后续检索
 │   ├── mcp_server/__init__.py   # 后续 MCP Server
 │   └── campus_client/            # 异步 Java Gateway HTTP 客户端
-├── knowledge/.gitkeep          # 后续规则知识文件
+├── knowledge/                  # 基于 CampusTrain 源码的规则文档
+│   ├── faq.md
+│   ├── enrollment_rules.md
+│   ├── cancellation_rules.md
+│   └── learning_rules.md
 ├── evals/.gitkeep              # 后续效果评估
 └── tests/
     ├── test_config.py
@@ -88,6 +92,18 @@ uv --version
 `.env`、本地密钥文件、数据库及其 WAL/SHM 文件、向量数据、虚拟环境和运行缓存已忽略。
 不要用 `git add -f` 绕过忽略规则；向量数据应存放在默认 `data/` 或其他已忽略目录。
 当前仅预留路径，不创建或连接数据库。
+
+## 第 3 步：RAG 知识库资料
+
+`knowledge/` 当前只存放面向后续检索的 Markdown 资料，不执行向量化、Embedding、
+Chroma、Retriever、MCP 或 Agent 工作流。四份文档分别覆盖 FAQ、报名、取消报名和学习进度。
+每条业务规则都带有 `CampusTrain/<模块>/<Java 文件>#<类或方法>` 来源引用；文档中明确
+标注了源码没有规定的政策，避免把推测写成业务规则。
+
+更新方式：先在 CampusTrain 实际源码中确认 Controller、Service、DTO/VO、枚举和配置的行为，
+再更新对应 Markdown，并运行 `uv run --locked pytest tests/test_knowledge.py`。该检查会验证四个
+必需文件、统一的 `#`/`##`/`###` 标题层级，以及每条 Source 引用的 Java/YAML 文件和符号仍存在。
+CampusTrain 目录只读，不复制 Java 实现，也不在本项目中修改它。
 
 ## CampusTrain 客户端与真实联调
 
@@ -150,10 +166,10 @@ git diff --check
 git status --short
 ```
 
-测试覆盖离线默认配置、环境变量优先级、密钥隐藏、URL 校验与 Streamlit 首页渲染。
+测试覆盖离线默认配置、环境变量优先级、密钥隐藏、URL 校验、Streamlit 首页渲染、
+CampusTrain 客户端异常处理和知识文档来源一致性。
 首页使用 Streamlit AppTest 执行实际脚本；服务启动验收还应启动 Streamlit 并检查
-`/_stcore/health` 和首页 HTTP 响应。以上检查不证明模型、MCP、RAG 或真实业务接口可用，
-这些能力属于后续阶段。
+`/_stcore/health` 和首页 HTTP 响应。模型、MCP、RAG 和未列出的业务接口仍属于后续阶段。
 
 ## 本次验收记录（2026-11-05）
 
@@ -177,3 +193,10 @@ Docker 容器；未执行取消报名。对无有效报名的培训 `199001` 读
 
 CampusTrain 工作区在勘查前后均干净。本次已验证 VM Gateway 的登录和上述只读业务接口；
 未验证模型、RAG、MCP、取消报名写操作或其他未列出的业务接口。
+
+## 第 3 步验收记录（2026-11-06）
+
+- 已读取 training-service、enrollment-service、learning-service 的实际 Service、VO、枚举和配置。
+- `knowledge/` 四份 Markdown 均包含统一的 `#`、`##`、`###` 标题、源码 Source 引用和明确的回答边界。
+- `tests/test_knowledge.py` 会检查必需文件、标题结构以及每条 CampusTrain 源码引用的文件和符号。
+- 未实现向量化、Embedding、Chroma、Retriever、MCP 或 Agent 工作流。
