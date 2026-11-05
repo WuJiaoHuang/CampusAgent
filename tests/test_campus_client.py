@@ -2,7 +2,11 @@ import httpx
 import pytest
 
 from campus_agent.campus_client import CampusTrainClient
-from campus_agent.campus_client.exceptions import CampusBusinessError, CampusHttpError
+from campus_agent.campus_client.exceptions import (
+    CampusBusinessError,
+    CampusHttpError,
+    CampusTransportError,
+)
 
 
 class FakeTransport(httpx.AsyncBaseTransport):
@@ -52,3 +56,56 @@ async def test_client_maps_http_and_business_errors():
             await client._request("GET", "/http")
         with pytest.raises(CampusBusinessError):
             await client._request("GET", "/business")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status_code", [401, 429, 503])
+async def test_client_maps_auth_throttling_and_unavailable_statuses(status_code):
+    class StatusTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            return httpx.Response(
+                status_code,
+                text='{"password":"secret-password","token":"secret-jwt"}',
+            )
+
+    async with CampusTrainClient("http://gateway", transport=StatusTransport()) as client:
+        with pytest.raises(CampusHttpError) as caught:
+            await client._request("GET", "/sensitive")
+    assert caught.value.status_code == status_code
+    assert "secret-password" not in str(caught.value)
+    assert "secret-jwt" not in str(caught.value)
+
+
+@pytest.mark.anyio
+async def test_client_maps_invalid_json():
+    class InvalidJsonTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            return httpx.Response(200, text="not-json")
+
+    async with CampusTrainClient("http://gateway", transport=InvalidJsonTransport()) as client:
+        with pytest.raises(CampusHttpError, match="响应不是 JSON"):
+            await client._request("GET", "/invalid-json")
+
+
+@pytest.mark.anyio
+async def test_client_maps_connection_failure_without_secret_text():
+    class ConnectionTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            raise httpx.ConnectError("connection failed with token=secret-jwt", request=request)
+
+    async with CampusTrainClient("http://gateway", transport=ConnectionTransport()) as client:
+        with pytest.raises(CampusTransportError) as caught:
+            await client._request("GET", "/connect")
+    assert "secret-jwt" not in str(caught.value)
+
+
+@pytest.mark.anyio
+async def test_client_maps_timeout_without_secret_text():
+    class TimeoutTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            raise httpx.ReadTimeout("password=secret-password", request=request)
+
+    async with CampusTrainClient("http://gateway", transport=TimeoutTransport()) as client:
+        with pytest.raises(CampusTransportError) as caught:
+            await client._request("GET", "/timeout")
+    assert "secret-password" not in str(caught.value)

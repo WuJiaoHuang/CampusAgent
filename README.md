@@ -93,7 +93,8 @@ uv --version
 
 `CampusTrainClient` 使用 `httpx.AsyncClient`，默认关闭环境代理，支持 Gateway 地址、
 Bearer JWT、请求超时、JSON 响应 envelope（`code`/`message`/`data`）解析，并将网络错误、
-HTTP 错误和业务错误分别转换为客户端异常。当前只实现读取和登录能力：
+HTTP 错误和业务错误分别转换为客户端异常。异常文本会截断并清理常见 token、password、
+secret 内容；客户端没有日志输出，也不会持久化 JWT。当前只实现读取和登录能力：
 
 - `login`：`POST /auth/login`
 - `get_training_detail`：`GET /training/get/{trainingId}`
@@ -131,11 +132,11 @@ uv run --locked pytest tests/test_integration.py -m integration -vv
   课程相关路径包括 `/training/**`、`/course/**`、`/chapter/**`、`/lesson/**`、`/video/**`；
   报名与学习路径分别为 `/enrollment/**`、`/learning/**`。
 - Gateway 校验 Bearer JWT；登录 `POST /auth/login` 和健康检查 `GET /actuator/health`
-  在白名单中。后续业务调用必须遵守真实鉴权规则。
+  在白名单中。已通过真实 Gateway 完成只读业务接口联调，后续调用仍必须遵守该鉴权规则。
 - 服务通过本地 `application.yml` 和 Nacos 环境配置组合加载，使用 `CAMPUS_ENV`、
   Nacos 地址及 namespace 等环境变量；配置组为 `CAMPUS_TRAIN`。
 - 现有部署说明的虚拟机 Nginx 外部入口为 `http://192.168.10.102`（80 端口），
-  可在后续联调时设置为 `CAMPUS_AGENT_GATEWAY_URL`。本阶段未验证其运行状态和连通性。
+  本次真实联调使用 `http://192.168.10.102` 并验证了登录及列出的只读接口；配置变量仍可在后续部署时覆盖。
 
 ## 检查命令
 
@@ -174,4 +175,5 @@ git status --short
 Docker 容器；未执行取消报名。对无有效报名的培训 `199001` 读取进度时真实返回 HTTP 403，客户端正确
 转换为 `CampusHttpError`，该结果没有被伪造成成功。
 
-CampusTrain 工作区在勘查前后均干净；本次未验证虚拟机、模型或业务接口。
+CampusTrain 工作区在勘查前后均干净。本次已验证 VM Gateway 的登录和上述只读业务接口；
+未验证模型、RAG、MCP、取消报名写操作或其他未列出的业务接口。

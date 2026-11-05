@@ -11,6 +11,7 @@ from campus_agent.campus_client.exceptions import (
     CampusBusinessError,
     CampusHttpError,
     CampusTransportError,
+    safe_message,
 )
 
 
@@ -93,9 +94,11 @@ class CampusTrainClient:
         try:
             response = await self._client.request(method, path, headers=headers, **kwargs)
         except httpx.HTTPError as error:
-            raise CampusTransportError(f"CampusTrain request failed for {path}: {error}") from error
+            raise CampusTransportError(
+                f"CampusTrain request failed for {path}: {safe_message(error)}"
+            ) from error
         if response.status_code >= 400:
-            raise CampusHttpError(response.status_code, path, response.text[:300])
+            raise CampusHttpError(response.status_code, path, "响应状态异常")
         try:
             envelope = response.json()
         except ValueError as error:

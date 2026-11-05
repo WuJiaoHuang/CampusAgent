@@ -23,8 +23,14 @@ async def test_real_campustrain_read_paths():
         enrollments = await client.get_my_enrollments()
         progress = await client.get_training_progress(training_id)
         lesson_progress = await client.get_lesson_progress(lesson_id)
-    assert detail
-    assert catalog is not None
-    assert "records" in enrollments or "total" in enrollments
-    assert progress is not None
-    assert lesson_progress
+    assert isinstance(detail["id"], int)
+    assert isinstance(detail["title"], str)
+    assert isinstance(catalog["trainingId"], int)
+    assert isinstance(catalog["courses"], list)
+    assert isinstance(enrollments["records"], list)
+    assert isinstance(enrollments["total"], int)
+    assert isinstance(progress["totalLessons"], int)
+    assert isinstance(progress["completedLessons"], int)
+    assert isinstance(progress["progressRatio"], (int, float))
+    assert isinstance(lesson_progress["lessonId"], int)
+    assert isinstance(lesson_progress["progressSeconds"], (int, float))
