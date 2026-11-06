@@ -24,3 +24,8 @@ class Settings(BaseSettings):
     sqlite_path: Path = Path("data/campus_agent.sqlite3")
     chroma_path: Path = Path("data/chroma")
     http_timeout_seconds: float = 10.0
+    knowledge_dir: Path = Path("knowledge")
+    vector_db_path: Path = Path("data/chroma")
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    model_cache_dir: Path = Path("data/models")
+    embedding_batch_size: int = 16
