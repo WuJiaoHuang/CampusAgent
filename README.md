@@ -5,7 +5,7 @@ CampusAgent 是独立的 Python 智能课程客服 Agent 项目。CampusTrain �
 与 HTTP API 使用其能力，负责 RAG、工具调用、多轮对话和业务操作编排。
 两个项目独立管理代码、依赖及 Git 历史，不复制 Java 实现。
 
-当前已完成工程初始化和第二步运行环境核查。首页可离线启动；第二步增加了异步
+当前已完成工程初始化、第二步运行环境核查和第三步知识库资料整理。首页可离线启动；第二步增加了异步
 CampusTrain Gateway 客户端和真实只读接口联调。尚未实现 RAG、MCP 服务、LangGraph
 工作流和数据库操作。
 
@@ -86,6 +86,11 @@ uv --version
 | `CAMPUS_AGENT_JWT_TOKEN` | 后续用户 JWT，当前可留空 |
 | `CAMPUS_AGENT_SQLITE_PATH` | 预留本地 SQLite 路径 |
 | `CAMPUS_AGENT_CHROMA_PATH` | 预留本地向量数据目录 |
+| `CAMPUS_AGENT_KNOWLEDGE_DIR` | Markdown 知识目录，默认 `knowledge` |
+| `CAMPUS_AGENT_VECTOR_DB_PATH` | Chroma 持久化目录，默认 `data/chroma` |
+| `CAMPUS_AGENT_EMBEDDING_MODEL` | 本地模型，默认 `BAAI/bge-small-zh-v1.5` |
+| `CAMPUS_AGENT_MODEL_CACHE_DIR` | 模型缓存目录，默认 `data/models` |
+| `CAMPUS_AGENT_EMBEDDING_BATCH_SIZE` | 批量向量化大小，默认 `16` |
 
 密钥和 JWT 使用 `SecretStr`，不在配置 repr 或 JSON 序列化中明文显示。
 不要把真实凭据写入源码、日志、知识文件或评估样本；不要输出完整配置。
@@ -193,6 +198,33 @@ Docker 容器；未执行取消报名。对无有效报名的培训 `199001` 读
 
 CampusTrain 工作区在勘查前后均干净。本次已验证 VM Gateway 的登录和上述只读业务接口；
 未验证模型、RAG、MCP、取消报名写操作或其他未列出的业务接口。
+
+## Stage 4：本地 RAG 知识库
+
+本阶段使用 CPU 本地 `BAAI/bge-small-zh-v1.5`，不调用付费 Embedding API，也不调用 DeepSeek。
+首次构建会下载模型到 `CAMPUS_AGENT_MODEL_CACHE_DIR`，后续复用缓存；下载或加载失败会直接报错。
+Chroma 使用 `CAMPUS_AGENT_VECTOR_DB_PATH` 持久化，构建会按确定性 chunk ID upsert，并删除知识目录中
+已不存在的 ID，因此支持重复构建、增量更新、删除同步和进程重启后的复用。
+
+Markdown 按 `#`、`##`、`###` 标题边界切分，每个分块保留标题路径、原文、文件路径和 Source 引用。
+检索返回文本、cosine distance、文件路径、标题路径和源码引用。
+
+```powershell
+# 项目根目录
+uv sync
+uv run --locked python -m campus_agent.rag.cli build
+uv run --locked python -m campus_agent.rag.cli query "报名后如何查看学习进度？" --top-k 3
+```
+
+首次 `build` 需要下载模型并保持网络可用，模型文件和 `data/` 不提交 Git。Fake Embedding 的
+单元测试覆盖分块、重复构建、增量更新、删除同步和持久化重启；真实 BGE 验证使用：
+
+```powershell
+uv run --locked python scripts/verify_real_rag.py
+```
+
+该脚本会构建临时 Chroma 索引，并用三个中文问题检查返回片段包含预期知识主题和 Source 引用，
+不会写入仓库中的 `data/`。
 
 ## 第 3 步验收记录（2026-11-06）
 

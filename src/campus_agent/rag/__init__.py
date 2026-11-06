@@ -1,1 +1,1 @@
-"""Reserved for future knowledge retrieval."""
+"""Local Markdown, BGE and Chroma knowledge-base components."""

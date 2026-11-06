@@ -23,6 +23,9 @@ htmlcov/
 
 # Local databases, vectors, logs and runtime files
 data/
+models/
+*.safetensors
+*.bin
 chroma/
 .chroma/
 *.db
