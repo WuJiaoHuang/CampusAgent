@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = Field(default=SecretStr(""), repr=False)
     llm_base_url: AnyHttpUrl = AnyHttpUrl("https://api.openai.com/v1")
     llm_model: str = ""
+    llm_disable_thinking: bool = True
     gateway_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8080")
     jwt_token: SecretStr = Field(default=SecretStr(""), repr=False)
     sqlite_path: Path = Path("data/campus_agent.sqlite3")

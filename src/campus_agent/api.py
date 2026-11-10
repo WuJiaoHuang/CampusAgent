@@ -79,6 +79,11 @@ if settings.llm_api_key.get_secret_value() and settings.llm_model:
         model=settings.llm_model,
         timeout=settings.http_timeout_seconds,
         max_retries=2,
+        extra_body=(
+            {"thinking": {"type": "disabled"}}
+            if settings.llm_disable_thinking
+            else None
+        ),
     )
 service = AgentService(settings, llm=llm, jwt_decoder=decode_jwt)
 
