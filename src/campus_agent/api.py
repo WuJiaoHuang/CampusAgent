@@ -61,8 +61,10 @@ async def lifespan(_app):
 
     service.rag = type("Retriever", (), {"search": search_knowledge})()
     bridge = McpBridge(Path.cwd(), settings.jwt_token.get_secret_value(), str(settings.gateway_url))
+    service.mcp_bridge = bridge
     names = await bridge.discover()
     from langchain_core.tools import StructuredTool
+
     service.tools["search_knowledge"] = StructuredTool.from_function(
         coroutine=search_knowledge,
         name="search_knowledge",

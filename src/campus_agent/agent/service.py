@@ -4,6 +4,7 @@ import json
 from typing import Any, TypedDict
 
 import aiosqlite
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 
@@ -49,6 +50,8 @@ class AgentService:
         if not claims or "sub" not in claims:
             raise ValueError("JWT 无效")
         key = ConversationMemory.user_key(str(claims["sub"]), session_id)
+        if hasattr(self, "mcp_bridge"):
+            self.mcp_bridge.set_jwt(jwt)
         history = self.memory.load(key)
         state = await self.graph.ainvoke(
             {"message": message, "history": history},
@@ -79,15 +82,23 @@ class AgentService:
             state["tool_calls"] = []
             return state
         model = self.llm.bind_tools(list(self.tools.values())) if self.tools else self.llm
-        result = await model.ainvoke(
-            state["history"] + [{"role": "user", "content": state["message"]}]
-        )
+        messages = [
+            HumanMessage(content=item["content"])
+            if item["role"] == "user"
+            else AIMessage(content=item["content"])
+            for item in state["history"]
+        ]
+        result = await model.ainvoke(messages + [HumanMessage(content=state["message"])])
+        state["ai_message"] = result
         state["tool_calls"] = list(getattr(result, "tool_calls", []))
         return state
 
     async def _execute(self, state, config):
-        request_jwt = config.get("configurable", {}).get("request_jwt", "")
         results = []
+        ai_message = state.get("ai_message")
+        if ai_message is None:
+            state["tool_results"] = results
+            return state
         for call in state.get("tool_calls", [])[: self.settings.max_tool_calls_per_request]:
             tool = self.tools.get(call.get("name"))
             if not tool:
@@ -97,27 +108,30 @@ class AgentService:
                 results.append(
                     {
                         "name": call["name"],
-                        "data": await tool(**call.get("args", {}), jwt=request_jwt),
+                        "data": await tool.ainvoke(call.get("args", {})),
                     }
                 )
             except Exception as exc:
                 results.append({"name": call["name"], "error": type(exc).__name__})
+        state["tool_messages"] = [
+            ToolMessage(
+                content=json.dumps(item.get("data", item.get("error")), ensure_ascii=False),
+                tool_call_id=call.get("id", "missing"),
+                name=call.get("name", "tool"),
+            )
+            for call, item in zip(state.get("tool_calls", []), results, strict=False)
+        ]
         state["tool_results"] = results
         return state
 
     async def _answer(self, state):
         if self.llm:
-            context = json.dumps(
-                {"context": state.get("context", []), "results": state.get("tool_results", [])},
-                ensure_ascii=False,
-            )
-            result = await self.llm.ainvoke(
-                state["history"]
-                + [
-                    {"role": "user", "content": state["message"]},
-                    {"role": "system", "content": context},
-                ]
-            )
+            messages = [HumanMessage(content=item["content"]) for item in state["history"]]
+            messages.append(HumanMessage(content=state["message"]))
+            if state.get("ai_message"):
+                messages.append(state["ai_message"])
+            messages.extend(state.get("tool_messages", []))
+            result = await self.llm.ainvoke(messages)
             state["answer"] = getattr(result, "content", str(result))
         else:
             state["answer"] = "我可以帮助查询课程、报名和学习进度。"

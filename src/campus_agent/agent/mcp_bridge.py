@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,10 @@ class McpBridge:
     def __init__(self, root: Path, gateway_jwt: str, gateway_url: str) -> None:
         self.root, self.jwt, self.gateway = root, gateway_jwt, gateway_url
         self.schemas: dict[str, Any] = {}
+        self._jwt_context: ContextVar[str] = ContextVar("mcp_jwt", default="")
+
+    def set_jwt(self, token: str):
+        return self._jwt_context.set(token)
 
     async def discover(self) -> list[str]:
         async with stdio_client(self._params()) as (read, write):
@@ -24,7 +29,7 @@ class McpBridge:
 
     async def call(self, name: str, args: dict[str, Any], jwt: str) -> Any:
         env = os.environ.copy()
-        env["CAMPUS_AGENT_JWT_TOKEN"] = jwt
+        env["CAMPUS_AGENT_JWT_TOKEN"] = jwt or self._jwt_context.get()
         env["CAMPUS_AGENT_GATEWAY_URL"] = self.gateway
         params = StdioServerParameters(
             command=sys.executable,
