@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any, TypedDict
 
-import aiosqlite
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -18,6 +17,8 @@ class AgentState(TypedDict, total=False):
     context: list[dict[str, Any]]
     tool_calls: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
+    ai_message: AIMessage
+    tool_messages: list[ToolMessage]
     answer: str
 
 
@@ -26,37 +27,58 @@ class AgentService:
         self.settings, self.rag = settings, rag
         self.llm, self.tools, self.jwt_decoder = llm, tools or {}, jwt_decoder
         self.memory = ConversationMemory(settings.sqlite_path)
-        graph = StateGraph(AgentState)
-        graph.add_node("retrieve", self._retrieve)
-        graph.add_node("decide", self._decide)
-        graph.add_node("execute", self._execute)
-        graph.add_node("answer", self._answer)
-        graph.add_edge(START, "retrieve")
-        graph.add_edge("retrieve", "decide")
-        graph.add_conditional_edges(
+        self._graph_builder = StateGraph(AgentState)
+        self._graph_builder.add_node("retrieve", self._retrieve)
+        self._graph_builder.add_node("decide", self._decide)
+        self._graph_builder.add_node("execute", self._execute)
+        self._graph_builder.add_node("answer", self._answer)
+        self._graph_builder.add_edge(START, "retrieve")
+        self._graph_builder.add_edge("retrieve", "decide")
+        self._graph_builder.add_conditional_edges(
             "decide", lambda s: "execute" if s.get("tool_calls") else "answer"
         )
-        graph.add_edge("execute", "answer")
-        graph.add_edge("answer", END)
-        try:
-            self._checkpoint_connection = aiosqlite.connect(str(settings.sqlite_path))
-            self.graph = graph.compile(checkpointer=AsyncSqliteSaver(self._checkpoint_connection))
-        except RuntimeError:
-            self._checkpoint_connection = None
-            self.graph = graph.compile()
+        self._graph_builder.add_edge("execute", "answer")
+        self._graph_builder.add_edge("answer", END)
+        self._checkpoint_context = None
+        self.graph = None
+
+    async def start(self) -> None:
+        if self.graph is not None:
+            return
+        self._checkpoint_context = AsyncSqliteSaver.from_conn_string(
+            str(self.settings.sqlite_path)
+        )
+        saver = await self._checkpoint_context.__aenter__()
+        self.graph = self._graph_builder.compile(checkpointer=saver)
+
+    async def close(self) -> None:
+        if self._checkpoint_context is not None:
+            await self._checkpoint_context.__aexit__(None, None, None)
+            self._checkpoint_context = None
+            self.graph = None
 
     async def chat(self, message: str, session_id: str, jwt: str) -> dict[str, Any]:
+        if self.graph is None:
+            await self.start()
         claims = self.jwt_decoder(jwt) if self.jwt_decoder else None
-        if not claims or "sub" not in claims:
+        user_id = claims.get("userId") if claims else None
+        if user_id is None and claims:
+            user_id = claims.get("sub")
+        if user_id is None:
             raise ValueError("JWT 无效")
-        key = ConversationMemory.user_key(str(claims["sub"]), session_id)
+        key = ConversationMemory.user_key(str(user_id), session_id)
+        jwt_context_token = None
         if hasattr(self, "mcp_bridge"):
-            self.mcp_bridge.set_jwt(jwt)
+            jwt_context_token = self.mcp_bridge.set_jwt(jwt)
         history = self.memory.load(key)
-        state = await self.graph.ainvoke(
-            {"message": message, "history": history},
-            config={"configurable": {"thread_id": key, "request_jwt": jwt}},
-        )
+        try:
+            state = await self.graph.ainvoke(
+                {"message": message, "history": history},
+                config={"configurable": {"thread_id": key}},
+            )
+        finally:
+            if jwt_context_token is not None:
+                self.mcp_bridge.reset_jwt(jwt_context_token)
         history.extend(
             [
                 {"role": "user", "content": message},

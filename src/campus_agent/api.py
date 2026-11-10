@@ -5,7 +5,7 @@ from pathlib import Path
 
 import jwt
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 from campus_agent.agent import AgentService
 from campus_agent.agent.mcp_bridge import McpBridge
@@ -39,6 +39,20 @@ class RetrieverAdapter:
         ]
 
 
+def _mcp_args_model(name: str, schema: dict):
+    type_map = {"integer": int, "number": float, "string": str, "boolean": bool}
+    required = set(schema.get("required", []))
+    fields = {}
+    for field_name, spec in schema.get("properties", {}).items():
+        python_type = type_map.get(spec.get("type"), object)
+        default = ... if field_name in required else spec.get("default", None)
+        fields[field_name] = (
+            python_type,
+            Field(default=default, description=spec.get("description")),
+        )
+    return create_model(f"{name.title().replace('_', '')}Args", **fields)
+
+
 def decode_jwt(token: str):
     if not settings.jwt_secret.get_secret_value():
         return None
@@ -66,44 +80,53 @@ service = AgentService(settings, llm=llm, jwt_decoder=decode_jwt)
 
 @asynccontextmanager
 async def lifespan(_app):
-    if not settings.knowledge_dir.exists():
-        raise RuntimeError(f"知识库目录不存在: {settings.knowledge_dir}")
-    embedder = BgeEmbedding(
-        settings.embedding_model, settings.model_cache_dir, settings.embedding_batch_size
-    )
-    store = KnowledgeStore(settings.vector_db_path, embedder)
-    if store.count() == 0:
-        chunks = load_markdown_chunks(settings.knowledge_dir)
-        if not chunks:
-            raise RuntimeError("知识库为空，请先运行 uv run campus-agent-rag build")
-        store.sync(chunks, settings.embedding_batch_size)
-
-    adapter = RetrieverAdapter(store)
-
-    async def search_knowledge(query: str, top_k: int = 3):
-        return await adapter.search(query, top_k)
-
-    service.rag = adapter
-    bridge = McpBridge(Path.cwd(), settings.jwt_token.get_secret_value(), str(settings.gateway_url))
-    service.mcp_bridge = bridge
-    names = await bridge.discover()
-    from langchain_core.tools import StructuredTool
-
-    service.tools["search_knowledge"] = StructuredTool.from_function(
-        coroutine=search_knowledge,
-        name="search_knowledge",
-        description="检索 CampusAgent 课程规则知识库并返回来源引用",
-    )
-
-    for name in names:
-
-        async def invoke(_name=name, jwt: str = "", **kwargs):
-            return await bridge.call(_name, kwargs, jwt)
-
-        service.tools[name] = StructuredTool.from_function(
-            coroutine=invoke, name=name, description=f"CampusTrain MCP 只读工具 {name}"
+    await service.start()
+    try:
+        if not settings.knowledge_dir.exists():
+            raise RuntimeError(f"知识库目录不存在: {settings.knowledge_dir}")
+        embedder = BgeEmbedding(
+            settings.embedding_model, settings.model_cache_dir, settings.embedding_batch_size
         )
-    yield
+        store = KnowledgeStore(settings.vector_db_path, embedder)
+        if store.count() == 0:
+            chunks = load_markdown_chunks(settings.knowledge_dir)
+            if not chunks:
+                raise RuntimeError("知识库为空，请先运行 uv run campus-agent-rag build")
+            store.sync(chunks, settings.embedding_batch_size)
+
+        adapter = RetrieverAdapter(store)
+
+        async def search_knowledge(query: str, top_k: int = 3):
+            return await adapter.search(query, top_k)
+
+        service.rag = adapter
+        bridge = McpBridge(
+            Path.cwd(), settings.jwt_token.get_secret_value(), str(settings.gateway_url)
+        )
+        service.mcp_bridge = bridge
+        names = await bridge.discover()
+        from langchain_core.tools import StructuredTool
+
+        service.tools["search_knowledge"] = StructuredTool.from_function(
+            coroutine=search_knowledge,
+            name="search_knowledge",
+            description="检索 CampusAgent 课程规则知识库并返回来源引用",
+        )
+
+        for name in names:
+            async def invoke(_name=name, **kwargs):
+                return await bridge.call(_name, kwargs, "")
+
+            definition = bridge.schemas[name]
+            service.tools[name] = StructuredTool.from_function(
+                coroutine=invoke,
+                name=name,
+                description=definition["description"],
+                args_schema=_mcp_args_model(name, definition["input_schema"]),
+            )
+        yield
+    finally:
+        await service.close()
 
 
 app = FastAPI(title="CampusAgent", version="0.1.0", lifespan=lifespan)

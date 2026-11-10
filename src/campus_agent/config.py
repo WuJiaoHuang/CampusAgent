@@ -30,5 +30,5 @@ class Settings(BaseSettings):
     model_cache_dir: Path = Path("data/models")
     embedding_batch_size: int = 16
     jwt_secret: SecretStr = Field(default=SecretStr(""), repr=False)
-    jwt_algorithm: str = "HS256"
+    jwt_algorithm: str = "HS512"
     max_tool_calls_per_request: int = 4

@@ -19,13 +19,22 @@ class McpBridge:
     def set_jwt(self, token: str):
         return self._jwt_context.set(token)
 
+    def reset_jwt(self, token) -> None:
+        self._jwt_context.reset(token)
+
     async def discover(self) -> list[str]:
         async with stdio_client(self._params()) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.list_tools()
-                self.schemas = {tool.name: tool.inputSchema for tool in result.tools}
-                return list(self.schemas)
+        self.schemas = {
+            tool.name: {
+                "description": tool.description or f"CampusTrain MCP 工具 {tool.name}",
+                "input_schema": tool.input_schema,
+            }
+            for tool in result.tools
+        }
+        return list(self.schemas)
 
     async def call(self, name: str, args: dict[str, Any], jwt: str) -> Any:
         env = os.environ.copy()
