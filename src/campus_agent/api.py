@@ -22,7 +22,18 @@ def decode_jwt(token: str):
         return None
 
 
-service = AgentService(settings, jwt_decoder=decode_jwt)
+llm = None
+if settings.llm_api_key.get_secret_value() and settings.llm_model:
+    from langchain_openai import ChatOpenAI
+
+    llm = ChatOpenAI(
+        api_key=settings.llm_api_key.get_secret_value(),
+        base_url=str(settings.llm_base_url),
+        model=settings.llm_model,
+        timeout=settings.http_timeout_seconds,
+        max_retries=2,
+    )
+service = AgentService(settings, llm=llm, jwt_decoder=decode_jwt)
 
 
 class ChatRequest(BaseModel):
