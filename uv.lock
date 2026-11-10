@@ -217,7 +217,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.2.20" },
     { name = "mcp", specifier = ">=2.3.0" },
     { name = "pydantic-settings", specifier = ">=2.16.2" },
-    { name = "sentence-transformers", specifier = ">=6.2.0" },
+    { name = "sentence-transformers", specifier = ">=5.2.0" },
     { name = "streamlit", specifier = ">=1.66.1" },
 ]
 

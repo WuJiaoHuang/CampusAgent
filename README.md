@@ -6,8 +6,8 @@ CampusAgent 是独立的 Python 智能课程客服 Agent 项目。CampusTrain �
 两个项目独立管理代码、依赖及 Git 历史，不复制 Java 实现。
 
 当前已完成工程初始化、第二步运行环境核查和第三步知识库资料整理。首页可离线启动；第二步增加了异步
-CampusTrain Gateway 客户端和真实只读接口联调。尚未实现 RAG、MCP 服务、LangGraph
-工作流和数据库操作。
+CampusTrain Gateway 客户端和真实只读接口联调。已实现本地 RAG 知识库和 MCP 只读工具层，
+尚未实现 DeepSeek 对话、LangGraph 工作流和数据库操作。
 
 ## 技术方案与目录
 
@@ -28,7 +28,7 @@ CampusAgent/
 │   ├── config.py                # 环境配置
 │   ├── agent/__init__.py        # 后续工作流和记忆
 │   ├── rag/__init__.py          # 后续检索
-│   ├── mcp_server/__init__.py   # 后续 MCP Server
+│   ├── mcp_server/              # MCP Server 工具层
 │   └── campus_client/            # 异步 Java Gateway HTTP 客户端
 ├── knowledge/                  # 基于 CampusTrain 源码的规则文档
 │   ├── faq.md
@@ -174,7 +174,7 @@ git status --short
 测试覆盖离线默认配置、环境变量优先级、密钥隐藏、URL 校验、Streamlit 首页渲染、
 CampusTrain 客户端异常处理和知识文档来源一致性。
 首页使用 Streamlit AppTest 执行实际脚本；服务启动验收还应启动 Streamlit 并检查
-`/_stcore/health` 和首页 HTTP 响应。模型、MCP、RAG 和未列出的业务接口仍属于后续阶段。
+`/_stcore/health` 和首页 HTTP 响应。DeepSeek、LangGraph 和未列出的业务接口仍属于后续阶段。
 
 ## 本次验收记录（2026-11-05）
 
@@ -232,3 +232,34 @@ uv run --locked python scripts/verify_real_rag.py
 - `knowledge/` 四份 Markdown 均包含统一的 `#`、`##`、`###` 标题、源码 Source 引用和明确的回答边界。
 - `tests/test_knowledge.py` 会检查必需文件、标题结构以及每条 CampusTrain 源码引用的文件和符号。
 - 未实现向量化、Embedding、Chroma、Retriever、MCP 或 Agent 工作流。
+
+## Stage 5：MCP Server 工具层
+
+MCP Server 位于 `src/campus_agent/mcp_server/`，使用当前已安装的 MCP SDK 2.x `MCPServer`
+（该版本将旧版 `FastMCP` 更名为 `MCPServer`）。Server 通过 stdio 暴露六个只读工具，工具内部
+复用 Stage 2 的异步 `CampusTrainClient`，调用链为：
+
+```text
+MCP Client -> MCPServer (stdio) -> CampusTrainClient -> CampusTrain Gateway -> CampusTrain services
+```
+
+工具包括 `get_training_detail`、`get_training_catalog`、`get_my_enrollments`、
+`get_training_progress`、`get_lesson_progress` 和 `get_chapter_progress`。工具返回结构化的
+`{"ok": true, "data": ...}` 或脱敏的错误结构，不拼接自然语言；ID、分页和报名状态会在工具层校验。
+需要 JWT 的工具会在描述中明确说明，Server 不绕过 Gateway，也不实现取消报名。
+
+Windows PowerShell 启动：
+
+```powershell
+$env:CAMPUS_AGENT_GATEWAY_URL = "http://192.168.10.102"
+$env:CAMPUS_AGENT_JWT_TOKEN = "<仅当前进程使用的 JWT>"
+uv run --locked python -m campus_agent.mcp_server.server
+```
+
+stdio 模式下 stdout 只用于 MCP 协议，不输出调试信息；配置中的 JWT 不会写入日志或返回结果。
+本阶段不接入 DeepSeek、LangGraph、Agent 对话或 Streamlit。
+
+Stage 5 验收中，Fake Transport 覆盖了工具发现、参数校验、401 错误脱敏和 MCP stdio
+Client↔Server 端到端调用。当前再次尝试真实 Gateway MCP 工具调用时，Gateway 连接超时；
+未将该失败包装成成功，也未修改或启动 CampusTrain 容器。Stage 2 曾验证过真实只读客户端，
+但本次 MCP 工具层的真实联调需在 Gateway 恢复可达后重新执行。

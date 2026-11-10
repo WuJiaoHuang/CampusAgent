@@ -1,1 +1,1 @@
-"""Reserved for the future MCP server."""
+"""MCP tools exposing read-only CampusTrain operations."""
