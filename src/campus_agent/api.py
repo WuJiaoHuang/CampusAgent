@@ -63,6 +63,11 @@ async def lifespan(_app):
     bridge = McpBridge(Path.cwd(), settings.jwt_token.get_secret_value(), str(settings.gateway_url))
     names = await bridge.discover()
     from langchain_core.tools import StructuredTool
+    service.tools["search_knowledge"] = StructuredTool.from_function(
+        coroutine=search_knowledge,
+        name="search_knowledge",
+        description="检索 CampusAgent 课程规则知识库并返回来源引用",
+    )
 
     for name in names:
 
