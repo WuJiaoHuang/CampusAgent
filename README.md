@@ -289,4 +289,18 @@ uv run --locked python -m campus_agent.rag.cli build
 
 2026-11-10 实际验收：真实 BGE/Chroma 经 `/agent/chat` 返回 `cancellation_rules.md` 及 Source；
 MCP stdio 发现六个工具，并通过真实 Gateway 成功查询培训 `16001` 详情、当前用户报名和培训进度。
-真实 DeepSeek 未验证，因为没有配置 API Key。
+
+### Stage 6 最终真实验收（2026-11-10）
+
+已配置 DeepSeek Flash 后，真实 FastAPI 服务以 `deepseek-flash` 非思考模式完成三次受控请求：
+
+- “取消报名后还能重新报名吗”调用 `search_knowledge`，命中 `cancellation_rules.md` 和源码 Source；
+- “查询培训 16001 的详细信息”调用 `get_training_detail(training_id=16001)`，经 MCP stdio 和 Gateway
+  返回真实培训数据；
+- 同一会话追问“这个培训的学习进度怎么样”调用
+  `get_training_progress(training_id=16001)`，验证了 SQLite 恢复的上下文指代。
+
+JWT 签名使用 CampusTrain 的 `HS512` 配置并优先以认证后的 `userId` 隔离会话。无效 JWT 返回 401；
+取消报名不在 Agent 注册的工具列表中。`AsyncSqliteSaver` 在 FastAPI lifespan 内创建与释放，离线测试验证
+服务重启后相同用户会话可恢复、不同用户相同 session ID 互相隔离。DeepSeek 的 token 用量当前未暴露到
+HTTP 响应；真实验收只记录了每个场景的工具调用和结果，避免记录敏感凭据。
