@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 import jwt
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from campus_agent.agent import AgentService
+from campus_agent.agent.mcp_bridge import McpBridge
 from campus_agent.config import Settings
+from campus_agent.rag.documents import load_markdown_chunks
+from campus_agent.rag.embeddings import BgeEmbedding
+from campus_agent.rag.store import KnowledgeStore
 
-app = FastAPI(title="CampusAgent", version="0.1.0")
 settings = Settings()
 
 
@@ -34,6 +40,42 @@ if settings.llm_api_key.get_secret_value() and settings.llm_model:
         max_retries=2,
     )
 service = AgentService(settings, llm=llm, jwt_decoder=decode_jwt)
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    if not settings.knowledge_dir.exists():
+        raise RuntimeError(f"知识库目录不存在: {settings.knowledge_dir}")
+    embedder = BgeEmbedding(
+        settings.embedding_model, settings.model_cache_dir, settings.embedding_batch_size
+    )
+    store = KnowledgeStore(settings.vector_db_path, embedder)
+    if store.count() == 0:
+        chunks = load_markdown_chunks(settings.knowledge_dir)
+        if not chunks:
+            raise RuntimeError("知识库为空，请先运行 uv run campus-agent-rag build")
+        store.sync(chunks, settings.embedding_batch_size)
+
+    async def search_knowledge(query: str, top_k: int = 3):
+        return [result.__dict__ for result in store.search(query, top_k)]
+
+    service.rag = type("Retriever", (), {"search": search_knowledge})()
+    bridge = McpBridge(Path.cwd(), settings.jwt_token.get_secret_value(), str(settings.gateway_url))
+    names = await bridge.discover()
+    from langchain_core.tools import StructuredTool
+
+    for name in names:
+
+        async def invoke(_name=name, jwt: str = "", **kwargs):
+            return await bridge.call(_name, kwargs, jwt)
+
+        service.tools[name] = StructuredTool.from_function(
+            coroutine=invoke, name=name, description=f"CampusTrain MCP 只读工具 {name}"
+        )
+    yield
+
+
+app = FastAPI(title="CampusAgent", version="0.1.0", lifespan=lifespan)
 
 
 class ChatRequest(BaseModel):
