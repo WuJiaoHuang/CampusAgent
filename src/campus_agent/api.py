@@ -17,6 +17,28 @@ from campus_agent.rag.store import KnowledgeStore
 settings = Settings()
 
 
+class RetrieverAdapter:
+    def __init__(self, store):
+        self.store = store
+
+    async def search(self, query: str, top_k: int = 3):
+        if not 1 <= top_k <= 10:
+            raise ValueError("top_k must be between 1 and 10")
+        import asyncio
+
+        results = await asyncio.to_thread(self.store.search, query, top_k)
+        return [
+            {
+                "text": item.text,
+                "distance": item.distance,
+                "source_path": item.source_path,
+                "heading_path": item.heading_path,
+                "source_refs": list(item.source_refs),
+            }
+            for item in results
+        ]
+
+
 def decode_jwt(token: str):
     if not settings.jwt_secret.get_secret_value():
         return None
@@ -56,10 +78,12 @@ async def lifespan(_app):
             raise RuntimeError("知识库为空，请先运行 uv run campus-agent-rag build")
         store.sync(chunks, settings.embedding_batch_size)
 
-    async def search_knowledge(query: str, top_k: int = 3):
-        return [result.__dict__ for result in store.search(query, top_k)]
+    adapter = RetrieverAdapter(store)
 
-    service.rag = type("Retriever", (), {"search": search_knowledge})()
+    async def search_knowledge(query: str, top_k: int = 3):
+        return await adapter.search(query, top_k)
+
+    service.rag = adapter
     bridge = McpBridge(Path.cwd(), settings.jwt_token.get_secret_value(), str(settings.gateway_url))
     service.mcp_bridge = bridge
     names = await bridge.discover()

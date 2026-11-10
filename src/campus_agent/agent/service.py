@@ -99,7 +99,11 @@ class AgentService:
         if ai_message is None:
             state["tool_results"] = results
             return state
-        for call in state.get("tool_calls", [])[: self.settings.max_tool_calls_per_request]:
+        calls = state.get("tool_calls", [])
+        for index, call in enumerate(calls):
+            if index >= self.settings.max_tool_calls_per_request:
+                results.append({"name": call.get("name"), "error": "tool call limit exceeded"})
+                continue
             tool = self.tools.get(call.get("name"))
             if not tool:
                 results.append({"name": call.get("name"), "error": "unknown tool"})
@@ -119,7 +123,7 @@ class AgentService:
                 tool_call_id=call.get("id", "missing"),
                 name=call.get("name", "tool"),
             )
-            for call, item in zip(state.get("tool_calls", []), results, strict=False)
+            for call, item in zip(calls, results, strict=True)
         ]
         state["tool_results"] = results
         return state
