@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, TypedDict
 
+import aiosqlite
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from campus_agent.agent.memory import ConversationMemory
@@ -35,7 +37,12 @@ class AgentService:
         )
         graph.add_edge("execute", "answer")
         graph.add_edge("answer", END)
-        self.graph = graph.compile()
+        try:
+            self._checkpoint_connection = aiosqlite.connect(str(settings.sqlite_path))
+            self.graph = graph.compile(checkpointer=AsyncSqliteSaver(self._checkpoint_connection))
+        except RuntimeError:
+            self._checkpoint_connection = None
+            self.graph = graph.compile()
 
     async def chat(self, message: str, session_id: str, jwt: str) -> dict[str, Any]:
         claims = self.jwt_decoder(jwt) if self.jwt_decoder else None
@@ -43,7 +50,10 @@ class AgentService:
             raise ValueError("JWT 无效")
         key = ConversationMemory.user_key(str(claims["sub"]), session_id)
         history = self.memory.load(key)
-        state = await self.graph.ainvoke({"message": message, "history": history, "jwt": jwt})
+        state = await self.graph.ainvoke(
+            {"message": message, "history": history},
+            config={"configurable": {"thread_id": key, "request_jwt": jwt}},
+        )
         history.extend(
             [
                 {"role": "user", "content": message},
@@ -75,7 +85,8 @@ class AgentService:
         state["tool_calls"] = list(getattr(result, "tool_calls", []))
         return state
 
-    async def _execute(self, state):
+    async def _execute(self, state, config):
+        request_jwt = config.get("configurable", {}).get("request_jwt", "")
         results = []
         for call in state.get("tool_calls", [])[: self.settings.max_tool_calls_per_request]:
             tool = self.tools.get(call.get("name"))
@@ -86,7 +97,7 @@ class AgentService:
                 results.append(
                     {
                         "name": call["name"],
-                        "data": await tool(**call.get("args", {}), jwt=state["jwt"]),
+                        "data": await tool(**call.get("args", {}), jwt=request_jwt),
                     }
                 )
             except Exception as exc:

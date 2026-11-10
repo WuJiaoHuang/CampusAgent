@@ -40,3 +40,7 @@ class ConversationMemory:
 
     def close(self) -> None:
         self._db.close()
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        return self._db
