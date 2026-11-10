@@ -3,7 +3,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from campus_agent.agent.mcp_bridge import McpBridge
+from campus_agent.api import _mcp_args_model
 from campus_agent.campus_client.exceptions import CampusHttpError
 from campus_agent.mcp_server.server import create_server
 
@@ -35,6 +38,34 @@ class FakeClient:
     async def get_chapter_progress(self, chapter_id):
         self.calls.append(("chapter_progress", chapter_id))
         return {"chapterId": chapter_id, "progressRatio": 0.0}
+
+
+@pytest.mark.anyio
+async def test_real_stdio_schemas_create_exact_langchain_argument_models():
+    bridge = McpBridge(Path.cwd(), "", "http://localhost")
+    names = await bridge.discover()
+    assert set(names) == {
+        "get_training_detail",
+        "get_training_catalog",
+        "get_my_enrollments",
+        "get_training_progress",
+        "get_lesson_progress",
+        "get_chapter_progress",
+    }
+    models = {
+        name: _mcp_args_model(name, definition["input_schema"])
+        for name, definition in bridge.schemas.items()
+    }
+    assert set(models["get_training_detail"].model_fields) == {"training_id"}
+    assert models["get_training_detail"](training_id=16001).training_id == 16001
+    with pytest.raises(ValidationError):
+        models["get_training_detail"]()
+    enrollment = models["get_my_enrollments"]()
+    assert (enrollment.page, enrollment.size, enrollment.status) == (1, 10, None)
+    assert models["get_my_enrollments"](status=1).status == 1
+    for model in models.values():
+        assert "jwt" not in model.model_fields
+        assert "userId" not in model.model_fields
 
 
 @pytest.mark.anyio
@@ -78,9 +109,7 @@ async def test_tool_maps_gateway_errors_without_sensitive_body():
                 "token=secret-jwt password=secret-password",
             )
 
-    result = await create_server(ErrorClient()).call_tool(
-        "get_training_detail", {"training_id": 1}
-    )
+    result = await create_server(ErrorClient()).call_tool("get_training_detail", {"training_id": 1})
     assert result.structured_content["ok"] is False
     assert result.structured_content["error"]["status_code"] == 401
     assert "secret-jwt" not in result.structured_content["error"]["message"]
@@ -107,4 +136,3 @@ async def test_stdio_client_discovers_and_calls_server():
             assert len(tools.tools) == 6
             result = await session.call_tool("get_training_detail", {"training_id": 0})
             assert result.is_error is True
-

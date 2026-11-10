@@ -44,7 +44,12 @@ def _mcp_args_model(name: str, schema: dict):
     required = set(schema.get("required", []))
     fields = {}
     for field_name, spec in schema.get("properties", {}).items():
-        python_type = type_map.get(spec.get("type"), object)
+        variants = spec.get("anyOf", [])
+        non_null = [item for item in variants if item.get("type") != "null"]
+        effective = non_null[0] if len(non_null) == 1 else spec
+        python_type = type_map.get(effective.get("type"), object)
+        if variants and len(non_null) != len(variants):
+            python_type = python_type | None
         default = ... if field_name in required else spec.get("default", None)
         fields[field_name] = (
             python_type,

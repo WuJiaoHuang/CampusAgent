@@ -152,7 +152,12 @@ class AgentService:
 
     async def _answer(self, state):
         if self.llm:
-            messages = [HumanMessage(content=item["content"]) for item in state["history"]]
+            messages = [
+                HumanMessage(content=item["content"])
+                if item["role"] == "user"
+                else AIMessage(content=item["content"])
+                for item in state["history"]
+            ]
             messages.append(HumanMessage(content=state["message"]))
             if state.get("ai_message"):
                 messages.append(state["ai_message"])

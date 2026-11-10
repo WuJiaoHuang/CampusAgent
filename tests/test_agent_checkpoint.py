@@ -1,7 +1,7 @@
 import sqlite3
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from campus_agent.agent import AgentService
 from campus_agent.config import Settings
@@ -41,6 +41,15 @@ async def test_sqlite_checkpoint_restart_and_user_isolation(tmp_path):
     flattened = " ".join(str(message.content) for call in second_llm.seen for message in call)
     assert "第一轮问题" in flattened
     assert "第一轮答案" in flattened
+    second_round_messages = second_llm.seen[0]
+    assert any(
+        isinstance(message, HumanMessage) and message.content == "第一轮问题"
+        for message in second_round_messages
+    )
+    assert any(
+        isinstance(message, AIMessage) and message.content == "第一轮答案"
+        for message in second_round_messages
+    )
 
     other_llm = RecordingLlm("用户 B 答案")
     second.llm = other_llm
