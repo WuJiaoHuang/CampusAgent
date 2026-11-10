@@ -29,3 +29,6 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     model_cache_dir: Path = Path("data/models")
     embedding_batch_size: int = 16
+    jwt_secret: SecretStr = Field(default=SecretStr(""), repr=False)
+    jwt_algorithm: str = "HS256"
+    max_tool_calls_per_request: int = 4

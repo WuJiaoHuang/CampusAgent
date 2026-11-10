@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jwt
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -7,7 +8,21 @@ from campus_agent.agent import AgentService
 from campus_agent.config import Settings
 
 app = FastAPI(title="CampusAgent", version="0.1.0")
-service = AgentService(Settings())
+settings = Settings()
+
+
+def decode_jwt(token: str):
+    if not settings.jwt_secret.get_secret_value():
+        return None
+    try:
+        return jwt.decode(
+            token, settings.jwt_secret.get_secret_value(), algorithms=[settings.jwt_algorithm]
+        )
+    except jwt.PyJWTError:
+        return None
+
+
+service = AgentService(settings, jwt_decoder=decode_jwt)
 
 
 class ChatRequest(BaseModel):

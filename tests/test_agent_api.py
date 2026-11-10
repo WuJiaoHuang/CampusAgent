@@ -9,6 +9,8 @@ def test_chat_requires_jwt():
 
 
 def test_chat_is_user_scoped():
+    from campus_agent.api import service
+    service.jwt_decoder = lambda token: {"sub": token}
     client = TestClient(app)
     payload = {"message": "你好", "session_id": "same"}
     first = client.post("/agent/chat", json=payload, headers={"Authorization": "Bearer a"})
