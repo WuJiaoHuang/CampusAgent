@@ -39,7 +39,9 @@ def load_markdown_chunks(knowledge_dir: Path) -> list[DocumentChunk]:
 def _parse_file(path: Path, knowledge_dir: Path) -> list[DocumentChunk]:
     relative_path = path.relative_to(knowledge_dir).as_posix()
     lines = path.read_text(encoding="utf-8").splitlines()
+    # 当前标题层级
     heading_stack: list[str] = []
+    # 当前chunk的文本内容
     current_lines: list[str] = []
     current_headings: tuple[str, ...] = ()
     chunks: list[DocumentChunk] = []

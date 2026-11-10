@@ -263,3 +263,14 @@ Stage 5 验收中，Fake Transport 覆盖了工具发现、参数校验、401 �
 Client↔Server 端到端调用。当前再次尝试真实 Gateway MCP 工具调用时，Gateway 连接超时；
 未将该失败包装成成功，也未修改或启动 CampusTrain 容器。Stage 2 曾验证过真实只读客户端，
 但本次 MCP 工具层的真实联调需在 Gateway 恢复可达后重新执行。
+## Stage 6（基础闭环）
+
+当前提供 FastAPI `POST /agent/chat`，使用 Bearer JWT、SQLite 会话隔离和可注入的 LLM/RAG/MCP 工具适配层。启动：
+
+```powershell
+uv run --locked python -m campus_agent
+```
+
+请求示例：`Invoke-RestMethod http://localhost:8000/agent/chat -Method Post -Headers @{Authorization="Bearer <JWT>"} -ContentType 'application/json' -Body '{"message":"查询培训16001详情","session_id":"demo"}'`。
+
+本阶段默认不调用模型；配置 `CAMPUS_AGENT_LLM_API_KEY`、`CAMPUS_AGENT_LLM_BASE_URL` 和 `CAMPUS_AGENT_LLM_MODEL` 后接入兼容 OpenAI API 的模型。取消报名仍只识别意图，不执行写操作。

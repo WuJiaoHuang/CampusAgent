@@ -1,1 +1,3 @@
-"""Reserved for future LangGraph workflows and conversation memory."""
+from .service import AgentService
+
+__all__ = ["AgentService"]
