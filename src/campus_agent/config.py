@@ -33,3 +33,4 @@ class Settings(BaseSettings):
     jwt_secret: SecretStr = Field(default=SecretStr(""), repr=False)
     jwt_algorithm: str = "HS512"
     max_tool_calls_per_request: int = 4
+    max_llm_decision_rounds: int = 4

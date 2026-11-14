@@ -1,4 +1,4 @@
-"""MCP stdio server entry point for read-only CampusTrain tools."""
+"""MCP stdio server entry point for CampusTrain tools."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def create_server(client: CampusTrainClient) -> MCPServer:
     server = MCPServer(
         name="campus-agent",
         version="0.1.0",
-        description="CampusTrain read-only business tools",
+        description="CampusTrain business tools; writes require Agent confirmation",
         log_level="WARNING",
     )
     return register_tools(server, client)

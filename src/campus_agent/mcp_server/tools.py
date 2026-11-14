@@ -1,4 +1,4 @@
-"""Read-only MCP tool registration for CampusTrain."""
+"""MCP tool registration for CampusTrain."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _failure(error: CampusClientError) -> dict[str, Any]:
 
 
 def register_tools(server: MCPServer, client: CampusTrainClient) -> MCPServer:
-    """Register six read-only tools against a reusable CampusTrain client."""
+    """Register six read-only and two confirmation-gated write tools."""
 
     @server.tool(
         description="查询培训详情。需要当前用户 JWT；training_id 必须是正整数。只读操作。",
@@ -122,6 +122,36 @@ def register_tools(server: MCPServer, client: CampusTrainClient) -> MCPServer:
         return await _validated_call(
             client.get_chapter_progress, _positive_id(chapter_id, "chapter_id")
         )
+
+    @server.tool(
+        description=(
+            "创建当前学生对指定培训的报名。写操作：必须由 CampusAgent 的人工确认流程调用；"
+            "training_id 必须是正整数。"
+        ),
+        structured_output=True,
+    )
+    async def create_enrollment(training_id: int) -> dict[str, Any]:
+        """Create an enrollment after the Agent's confirmation workflow approves it."""
+        try:
+            enrollment_id = await client.create_enrollment(_positive_id(training_id, "training_id"))
+            return {"ok": True, "data": {"enrollment_id": enrollment_id}}
+        except CampusClientError as error:
+            return _failure(error)
+
+    @server.tool(
+        description=(
+            "取消当前学生自己的报名。写操作：必须由 CampusAgent 的人工确认流程调用；"
+            "enrollment_id 必须是正整数。"
+        ),
+        structured_output=True,
+    )
+    async def cancel_enrollment(enrollment_id: int) -> dict[str, Any]:
+        """Cancel an enrollment after the Agent's confirmation workflow approves it."""
+        try:
+            await client.cancel_enrollment(_positive_id(enrollment_id, "enrollment_id"))
+            return {"ok": True, "data": {"enrollment_id": enrollment_id}}
+        except CampusClientError as error:
+            return _failure(error)
 
     return server
 

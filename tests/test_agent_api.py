@@ -186,3 +186,68 @@ def test_fake_llm_multiple_tool_messages_and_new_turn_reset(monkeypatch):
         not isinstance(message, ToolMessage)
         for message in observed["second_turn_messages"][-2:]
     )
+
+
+def test_http_confirmation_executes_frozen_write_only_after_approval(monkeypatch):
+    _patch_lifespan(monkeypatch)
+    records, writes = [], []
+
+    class WriteLlm:
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, _messages):
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "write-1", "name": "create_enrollment", "args": {"training_id": 9}}
+                ],
+            )
+
+    async def mine(page: int = 1, size: int = 100):
+        return {"ok": True, "data": {"records": list(records), "page": page, "size": size}}
+
+    async def detail(training_id: int):
+        return {"ok": True, "data": {"id": training_id}}
+
+    async def create(training_id: int):
+        writes.append(training_id)
+        records.append({"enrollmentId": 99, "trainingId": training_id, "status": 1})
+        return {"ok": True, "data": {"enrollment_id": 99}}
+
+    api.service.llm = WriteLlm()
+    api.service.tools.update(
+        {
+            "get_my_enrollments": StructuredTool.from_function(
+                coroutine=mine, name="get_my_enrollments", description="报名记录"
+            ),
+            "get_training_detail": StructuredTool.from_function(
+                coroutine=detail, name="get_training_detail", description="培训详情"
+            ),
+            "create_enrollment": StructuredTool.from_function(
+                coroutine=create, name="create_enrollment", description="创建报名"
+            ),
+        }
+    )
+    session_id = f"confirm-{uuid4()}"
+    with TestClient(api.app) as client:
+        pending = client.post(
+            "/agent/chat",
+            json={"message": "报名培训9", "session_id": session_id},
+            headers={"Authorization": "Bearer user-a-token"},
+        )
+        assert pending.status_code == 200
+        assert pending.json()["status"] == "pending_confirmation"
+        assert writes == []
+        confirmed = client.post(
+            "/agent/confirm",
+            json={
+                "session_id": session_id,
+                "operation_id": pending.json()["pending_action"]["operation_id"],
+                "approved": True,
+            },
+            headers={"Authorization": "Bearer user-a-token"},
+        )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["answer"] == "操作已完成并核验成功。"
+    assert writes == [9]

@@ -7,7 +7,7 @@ CampusAgent 是独立的 Python 智能课程客服 Agent 项目。CampusTrain �
 
 当前已完成工程初始化、第二步运行环境核查和第三步知识库资料整理。首页可离线启动；第二步增加了异步
 CampusTrain Gateway 客户端和真实只读接口联调。已实现本地 RAG 知识库和 MCP 只读工具层，
-已实现本地 RAG、MCP 只读工具层及 Stage 6 的 FastAPI + DeepSeek Tool Calling + LangGraph 工作流；
+已实现本地 RAG、八个 MCP 工具及 Stage 6/7 的 FastAPI + DeepSeek Tool Calling + LangGraph ReAct 工作流；
 不实现 CampusTrain 业务数据库操作。
 
 ## 技术方案与目录
@@ -277,7 +277,7 @@ uv run --locked python -m campus_agent
 
 请求示例：`Invoke-RestMethod http://localhost:8000/agent/chat -Method Post -Headers @{Authorization="Bearer <JWT>"} -ContentType 'application/json' -Body '{"message":"查询培训16001详情","session_id":"demo"}'`。
 
-应用 lifespan 会加载一次 BGE/Chroma、发现六个 MCP stdio 工具，并初始化/关闭
+应用 lifespan 会加载一次 BGE/Chroma、发现八个 MCP stdio 工具，并初始化/关闭
 `AsyncSqliteSaver`。知识索引为空时先执行：
 
 ```powershell
@@ -286,7 +286,7 @@ uv run --locked python -m campus_agent.rag.cli build
 
 配置 `CAMPUS_AGENT_LLM_API_KEY`、`CAMPUS_AGENT_LLM_BASE_URL` 和 `CAMPUS_AGENT_LLM_MODEL`
 后可接入兼容 OpenAI Tool Calling 的 DeepSeek 模型。无 Key 时仅能运行 Fake LLM 验收测试。
-取消报名不会注册为写工具。
+写工具只会由 Stage 7 的确认工作流调用，普通工具执行节点不能绕过确认直接写入。
 
 2026-11-10 实际验收：真实 BGE/Chroma 经 `/agent/chat` 返回 `cancellation_rules.md` 及 Source；
 MCP stdio 发现六个工具，并通过真实 Gateway 成功查询培训 `16001` 详情、当前用户报名和培训进度。
@@ -302,7 +302,7 @@ MCP stdio 发现六个工具，并通过真实 Gateway 成功查询培训 `16001
   `get_training_progress(training_id=16001)`，验证了 SQLite 恢复的上下文指代。
 
 JWT 签名使用 CampusTrain 的 `HS512` 配置并优先以认证后的 `userId` 隔离会话。无效 JWT 返回 401；
-取消报名不在 Agent 注册的工具列表中。`AsyncSqliteSaver` 在 FastAPI lifespan 内创建与释放，离线测试验证
+`AsyncSqliteSaver` 在 FastAPI lifespan 内创建与释放，离线测试验证
 服务重启后相同用户会话可恢复、不同用户相同 session ID 互相隔离。DeepSeek 的 token 用量当前未暴露到
 HTTP 响应；真实验收只记录了每个场景的工具调用和结果，避免记录敏感凭据。
 
@@ -316,3 +316,38 @@ Agent 使用 `MessagesState` 的 `messages` 字段（`add_messages` reducer）�
 此前 `conversations` 表中的旧消息不会自动迁移到 Checkpointer，也不会被删除；升级后的新对话仅使用
 LangGraph Checkpoint。稳定线程键仍是 `SHA256(str(user_id)) + ":" + session_id`，因此已有 Checkpoint
 不会因本次改动改变线程标识。
+
+## Stage 7：ReAct 与安全写操作确认
+
+工作流为 `START → retrieve → decide → execute → decide`；当模型不再请求工具时转入 `answer`。每个
+HTTP 请求都会重新计数，默认最多 4 次工具调用和 4 次 LLM 决策，图也设置了递归上限。未知工具、参数错误、
+工具异常以及超过额度的工具调用都生成匹配 `tool_call_id` 的 `ToolMessage`，不会留下不完整的 Tool Calling
+消息序列。
+
+MCP Server 现注册八个工具：六个只读查询工具，以及 `create_enrollment(training_id)` 和
+`cancel_enrollment(enrollment_id)`。写工具只能经如下四阶段执行：
+
+```text
+Prepare → LangGraph interrupt → POST /agent/confirm → Execute → Verify
+```
+
+Prepare 会冻结工具名和参数，并通过当前用户的报名记录核验创建/取消前置条件；取消操作必须对应当前用户状态为
+`ENROLLED(1)` 的真实报名。`POST /agent/confirm` 必须带本次认证 JWT、原 session ID 和 operation ID，且只
+接受显式布尔 `approved`。拒绝不会调用写工具。确认记录保存于本地 `data/*_actions.sqlite3`，以用户线程和
+操作 ID 约束；状态转移 `PREPARED → CONFIRMED → EXECUTING` 防止重复确认。写入超时或结果不明确会标为待核实，
+不会自动重试。Verify 重新读取我的报名记录：创建须存在有效报名，取消须为 `CANCELLED(0)`。
+
+```powershell
+# 发起可能写入的请求后，先检查 status 和 pending_action，不会立即写入
+Invoke-RestMethod http://localhost:8000/agent/chat -Method Post `
+  -Headers @{Authorization="Bearer <JWT>"} -ContentType 'application/json' `
+  -Body '{"message":"报名培训 16001","session_id":"demo"}'
+
+# 仅在用户明确确认后，使用上一步的 operation_id 恢复执行
+Invoke-RestMethod http://localhost:8000/agent/confirm -Method Post `
+  -Headers @{Authorization="Bearer <JWT>"} -ContentType 'application/json' `
+  -Body '{"session_id":"demo","operation_id":"<operation-id>","approved":true}'
+```
+
+RAG 仍使用 BGE + Chroma。`retrieve` 的结果作为单次模型决策的低优先级、非持久化参考消息，并同时返回 citations；
+`search_knowledge` 仍可由模型自主调用。外部检索内容不写入 System Message、JWT 或 Checkpoint。

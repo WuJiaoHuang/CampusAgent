@@ -39,6 +39,13 @@ class FakeClient:
         self.calls.append(("chapter_progress", chapter_id))
         return {"chapterId": chapter_id, "progressRatio": 0.0}
 
+    async def create_enrollment(self, training_id):
+        self.calls.append(("create", training_id))
+        return 9001
+
+    async def cancel_enrollment(self, enrollment_id):
+        self.calls.append(("cancel", enrollment_id))
+
 
 @pytest.mark.anyio
 async def test_real_stdio_schemas_create_exact_langchain_argument_models():
@@ -51,6 +58,8 @@ async def test_real_stdio_schemas_create_exact_langchain_argument_models():
         "get_training_progress",
         "get_lesson_progress",
         "get_chapter_progress",
+        "create_enrollment",
+        "cancel_enrollment",
     }
     models = {
         name: _mcp_args_model(name, definition["input_schema"])
@@ -63,6 +72,8 @@ async def test_real_stdio_schemas_create_exact_langchain_argument_models():
     enrollment = models["get_my_enrollments"]()
     assert (enrollment.page, enrollment.size, enrollment.status) == (1, 10, None)
     assert models["get_my_enrollments"](status=1).status == 1
+    assert models["create_enrollment"](training_id=1).training_id == 1
+    assert models["cancel_enrollment"](enrollment_id=1).enrollment_id == 1
     for model in models.values():
         assert "jwt" not in model.model_fields
         assert "userId" not in model.model_fields
@@ -81,11 +92,17 @@ async def test_tools_are_discoverable_and_map_arguments():
         "get_training_progress",
         "get_lesson_progress",
         "get_chapter_progress",
+        "create_enrollment",
+        "cancel_enrollment",
     }
     result = await server.call_tool("get_my_enrollments", {"page": 2, "size": 20, "status": 1})
     assert result.is_error is False
     assert result.structured_content["data"]["page"] == 2
     assert client.calls[-1] == ("enrollments", {"page": 2, "size": 20, "status": 1})
+    created = await server.call_tool("create_enrollment", {"training_id": 1})
+    assert created.structured_content["data"]["enrollment_id"] == 9001
+    await server.call_tool("cancel_enrollment", {"enrollment_id": 9001})
+    assert client.calls[-1] == ("cancel", 9001)
 
 
 @pytest.mark.anyio
@@ -133,6 +150,6 @@ async def test_stdio_client_discovers_and_calls_server():
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             tools = await session.list_tools()
-            assert len(tools.tools) == 6
+            assert len(tools.tools) == 8
             result = await session.call_tool("get_training_detail", {"training_id": 0})
             assert result.is_error is True

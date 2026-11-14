@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -22,6 +24,11 @@ class FakeTransport(httpx.AsyncBaseTransport):
             return httpx.Response(200, json={"code": 0, "data": {"courses": []}})
         if request.url.path == "/enrollment/list/mine":
             return httpx.Response(200, json={"code": 0, "data": {"records": [], "total": 0}})
+        if request.url.path == "/enrollment/create":
+            assert json.loads(request.content) == {"trainingId": 1}
+            return httpx.Response(200, json={"code": 0, "data": 9001})
+        if request.url.path == "/enrollment/cancel/9001":
+            return httpx.Response(200, json={"code": 0, "data": None})
         if request.url.path == "/learning/get/training-progress/1":
             return httpx.Response(200, json={"code": 0, "data": {"progressRatio": 0}})
         if request.url.path == "/learning/get-progress/1":
@@ -41,6 +48,8 @@ async def test_client_login_and_read_operations():
         assert (await client.get_training_progress(1))["progressRatio"] == 0
         assert (await client.get_lesson_progress(1))["lessonId"] == 1
         assert (await client.get_chapter_progress(1))["chapterId"] == 1
+        assert await client.create_enrollment(1) == 9001
+        await client.cancel_enrollment(9001)
 
 
 @pytest.mark.anyio

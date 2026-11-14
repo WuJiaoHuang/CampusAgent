@@ -1,4 +1,4 @@
-"""Async HTTP client for the read-only CampusTrain operations used by the agent."""
+"""Async HTTP client for CampusTrain operations used by the agent."""
 
 from __future__ import annotations
 
@@ -73,6 +73,21 @@ class CampusTrainClient:
         if status is not None:
             params["status"] = status
         return self._mapping(await self._request("GET", "/enrollment/list/mine", params=params))
+
+    async def create_enrollment(self, training_id: int) -> int:
+        """Create or reactivate the current student's enrollment."""
+        data = await self._request(
+            "POST", "/enrollment/create", json={"trainingId": training_id}
+        )
+        if isinstance(data, bool) or not isinstance(data, int) or data <= 0:
+            raise CampusBusinessError(
+                "invalid", "创建报名响应缺少有效报名 ID", "/enrollment/create"
+            )
+        return data
+
+    async def cancel_enrollment(self, enrollment_id: int) -> None:
+        """Cancel the current student's enrollment without retrying uncertain writes."""
+        await self._request("POST", f"/enrollment/cancel/{enrollment_id}")
 
     async def get_training_progress(self, training_id: int) -> Mapping[str, Any]:
         return self._mapping(
