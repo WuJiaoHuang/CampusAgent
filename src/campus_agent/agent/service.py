@@ -152,16 +152,19 @@ class AgentService:
         return {"messages": messages}
 
     async def _answer(self, state: AgentState) -> dict[str, Any]:
+        # Without an LLM, a new fallback must be appended for *this* turn. Do
+        # not inspect historical AI messages: the latest one may belong to a
+        # previous request restored by the checkpointer.
+        if not self.llm:
+            fallback = AIMessage(content="我可以帮助查询课程、报名和学习进度。")
+            return {"messages": [fallback], "answer": str(fallback.content)}
+
         latest = self._latest_ai_message(state["messages"])
         # A tool-free response from decide is already the final answer. Calling
         # the LLM again would waste a request and duplicate the assistant turn.
         if latest is not None and not latest.tool_calls:
             return {"answer": str(latest.content)}
-        if self.llm:
-            result = await self.llm.ainvoke(state["messages"])
-            if not isinstance(result, AIMessage):
-                raise TypeError("模型必须返回 AIMessage")
-            return {"messages": [result], "answer": str(result.content)}
-
-        fallback = AIMessage(content="我可以帮助查询课程、报名和学习进度。")
-        return {"messages": [fallback], "answer": str(fallback.content)}
+        result = await self.llm.ainvoke(state["messages"])
+        if not isinstance(result, AIMessage):
+            raise TypeError("模型必须返回 AIMessage")
+        return {"messages": [result], "answer": str(result.content)}
