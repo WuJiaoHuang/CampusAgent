@@ -7,7 +7,8 @@ CampusAgent 是独立的 Python 智能课程客服 Agent 项目。CampusTrain �
 
 当前已完成工程初始化、第二步运行环境核查和第三步知识库资料整理。首页可离线启动；第二步增加了异步
 CampusTrain Gateway 客户端和真实只读接口联调。已实现本地 RAG 知识库和 MCP 只读工具层，
-尚未实现 DeepSeek 对话、LangGraph 工作流和数据库操作。
+已实现本地 RAG、MCP 只读工具层及 Stage 6 的 FastAPI + DeepSeek Tool Calling + LangGraph 工作流；
+不实现 CampusTrain 业务数据库操作。
 
 ## 技术方案与目录
 
@@ -304,3 +305,14 @@ JWT 签名使用 CampusTrain 的 `HS512` 配置并优先以认证后的 `userId`
 取消报名不在 Agent 注册的工具列表中。`AsyncSqliteSaver` 在 FastAPI lifespan 内创建与释放，离线测试验证
 服务重启后相同用户会话可恢复、不同用户相同 session ID 互相隔离。DeepSeek 的 token 用量当前未暴露到
 HTTP 响应；真实验收只记录了每个场景的工具调用和结果，避免记录敏感凭据。
+
+### LangGraph 消息持久化
+
+Agent 使用 `MessagesState` 的 `messages` 字段（`add_messages` reducer）统一保存 `HumanMessage`、
+`AIMessage` 和 `ToolMessage`。`AsyncSqliteSaver` 是唯一的对话消息持久化机制；同一用户和会话恢复
+同一 `thread_id`，不同认证用户即使提交相同 `session_id` 也使用不同线程。每个 HTTP 请求会重置仅用于
+响应的 `context`、`tool_calls` 和 `answer`，避免上一轮的工具摘要污染新请求。
+
+此前 `conversations` 表中的旧消息不会自动迁移到 Checkpointer，也不会被删除；升级后的新对话仅使用
+LangGraph Checkpoint。稳定线程键仍是 `SHA256(str(user_id)) + ":" + session_id`，因此已有 Checkpoint
+不会因本次改动改变线程标识。

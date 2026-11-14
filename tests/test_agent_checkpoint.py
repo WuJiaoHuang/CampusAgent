@@ -32,7 +32,6 @@ async def test_sqlite_checkpoint_restart_and_user_isolation(tmp_path):
     await first.start()
     await first.chat("第一轮问题", "shared-session", "user-a-old-token")
     await first.close()
-    first.memory.close()
 
     second_llm = RecordingLlm("第二轮答案")
     second = AgentService(settings, llm=second_llm, jwt_decoder=decoder)
@@ -59,7 +58,6 @@ async def test_sqlite_checkpoint_restart_and_user_isolation(tmp_path):
     )
     assert "第一轮问题" not in other_flattened
     await second.close()
-    second.memory.close()
 
     connection = sqlite3.connect(db)
     assert connection.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] > 0
