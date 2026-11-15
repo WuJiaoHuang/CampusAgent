@@ -41,7 +41,7 @@ def _failure(error: CampusClientError) -> dict[str, Any]:
 
 
 def register_tools(server: MCPServer, client: CampusTrainClient) -> MCPServer:
-    """Register six read-only and two confirmation-gated write tools."""
+    """Register read-only lookup and confirmation-gated write tools."""
 
     @server.tool(
         description="查询培训详情。需要当前用户 JWT；training_id 必须是正整数。只读操作。",
@@ -63,6 +63,27 @@ def register_tools(server: MCPServer, client: CampusTrainClient) -> MCPServer:
         """Return the hierarchical training catalog."""
         return await _validated_call(
             client.get_training_catalog, _positive_id(training_id, "training_id")
+        )
+
+    @server.tool(
+        description=(
+            "按标题查询可报名培训，返回真实 training_id、title、容量和报名时间；"
+            "title 可省略，page 从 1 开始，size 为 1 到 100。只读操作。"
+        ),
+        structured_output=True,
+    )
+    async def search_trainings(
+        title: str | None = None, page: int = 1, size: int = 20, status: int | None = 1
+    ) -> dict[str, Any]:
+        """Return training candidates for title-based slot resolution."""
+        _page(page, "page", 2_147_483_647)
+        _page(size, "size", 100)
+        if status not in (None, 0, 1):
+            raise ToolError("status 只能是 0、1 或省略")
+        if title is not None and not title.strip():
+            raise ToolError("title 不能为空字符串")
+        return await _validated_call(
+            client.search_trainings, title=title, page=page, size=size, status=status
         )
 
     @server.tool(

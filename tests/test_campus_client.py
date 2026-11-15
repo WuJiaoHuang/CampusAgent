@@ -22,6 +22,9 @@ class FakeTransport(httpx.AsyncBaseTransport):
             return httpx.Response(200, json={"code": 0, "data": {"id": 1, "name": "demo"}})
         if request.url.path == "/training/get/catalog/1":
             return httpx.Response(200, json={"code": 0, "data": {"courses": []}})
+        if request.url.path == "/training/list/page":
+            assert request.url.params["title"] == "Java"
+            return httpx.Response(200, json={"code": 0, "data": {"records": [], "total": 0}})
         if request.url.path == "/enrollment/list/mine":
             return httpx.Response(200, json={"code": 0, "data": {"records": [], "total": 0}})
         if request.url.path == "/enrollment/create":
@@ -44,6 +47,7 @@ async def test_client_login_and_read_operations():
         await client.login("student", "password")
         assert (await client.get_training_detail(1))["id"] == 1
         assert (await client.get_training_catalog(1))["courses"] == []
+        assert (await client.search_trainings(title="Java"))["total"] == 0
         assert (await client.get_my_enrollments())["total"] == 0
         assert (await client.get_training_progress(1))["progressRatio"] == 0
         assert (await client.get_lesson_progress(1))["lessonId"] == 1

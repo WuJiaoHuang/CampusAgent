@@ -66,6 +66,17 @@ class CampusTrainClient:
     async def get_training_catalog(self, training_id: int) -> Mapping[str, Any]:
         return self._mapping(await self._request("GET", f"/training/get/catalog/{training_id}"))
 
+    async def search_trainings(
+        self, *, title: str | None = None, page: int = 1, size: int = 20, status: int | None = 1
+    ) -> Mapping[str, Any]:
+        """Find real trainings by title through CampusTrain's paginated API."""
+        params: dict[str, Any] = {"pageNum": page, "pageSize": size}
+        if title:
+            params["title"] = title
+        if status is not None:
+            params["status"] = status
+        return self._mapping(await self._request("GET", "/training/list/page", params=params))
+
     async def get_my_enrollments(
         self, *, page: int = 1, size: int = 10, status: int | None = None
     ) -> Mapping[str, Any]:

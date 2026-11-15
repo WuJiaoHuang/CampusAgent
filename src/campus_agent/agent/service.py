@@ -194,7 +194,11 @@ class AgentService:
             "session_id": session_id,
             "tool_calls": state.get("tool_calls", []),
             "citations": state.get("context", []),
-            **({"status": "pending_confirmation", "pending_action": pending} if pending else {}),
+            **(
+                {"status": "pending_confirmation", "pending_action": pending}
+                if pending and not state.get("confirmation")
+                else {}
+            ),
         }
 
     async def _retrieve(self, state: AgentState) -> dict[str, Any]:

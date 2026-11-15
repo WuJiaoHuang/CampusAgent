@@ -250,4 +250,5 @@ def test_http_confirmation_executes_frozen_write_only_after_approval(monkeypatch
         )
     assert confirmed.status_code == 200
     assert confirmed.json()["answer"] == "操作已完成并核验成功。"
+    assert "status" not in confirmed.json()
     assert writes == [9]

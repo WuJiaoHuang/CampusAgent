@@ -23,6 +23,10 @@ class FakeClient:
         self.calls.append(("catalog", training_id))
         return {"trainingId": training_id, "courses": []}
 
+    async def search_trainings(self, **kwargs):
+        self.calls.append(("search", kwargs))
+        return {"records": [], "total": 0, **kwargs}
+
     async def get_my_enrollments(self, **kwargs):
         self.calls.append(("enrollments", kwargs))
         return {"records": [], "total": 0, **kwargs}
@@ -54,6 +58,7 @@ async def test_real_stdio_schemas_create_exact_langchain_argument_models():
     assert set(names) == {
         "get_training_detail",
         "get_training_catalog",
+        "search_trainings",
         "get_my_enrollments",
         "get_training_progress",
         "get_lesson_progress",
@@ -72,6 +77,7 @@ async def test_real_stdio_schemas_create_exact_langchain_argument_models():
     enrollment = models["get_my_enrollments"]()
     assert (enrollment.page, enrollment.size, enrollment.status) == (1, 10, None)
     assert models["get_my_enrollments"](status=1).status == 1
+    assert models["search_trainings"](title="Java").title == "Java"
     assert models["create_enrollment"](training_id=1).training_id == 1
     assert models["cancel_enrollment"](enrollment_id=1).enrollment_id == 1
     for model in models.values():
@@ -88,6 +94,7 @@ async def test_tools_are_discoverable_and_map_arguments():
     assert {tool.name for tool in tools} == {
         "get_training_detail",
         "get_training_catalog",
+        "search_trainings",
         "get_my_enrollments",
         "get_training_progress",
         "get_lesson_progress",
@@ -99,6 +106,8 @@ async def test_tools_are_discoverable_and_map_arguments():
     assert result.is_error is False
     assert result.structured_content["data"]["page"] == 2
     assert client.calls[-1] == ("enrollments", {"page": 2, "size": 20, "status": 1})
+    await server.call_tool("search_trainings", {"title": "Java"})
+    assert client.calls[-1] == ("search", {"title": "Java", "page": 1, "size": 20, "status": 1})
     created = await server.call_tool("create_enrollment", {"training_id": 1})
     assert created.structured_content["data"]["enrollment_id"] == 9001
     await server.call_tool("cancel_enrollment", {"enrollment_id": 9001})
@@ -150,6 +159,6 @@ async def test_stdio_client_discovers_and_calls_server():
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             tools = await session.list_tools()
-            assert len(tools.tools) == 8
+            assert len(tools.tools) == 9
             result = await session.call_tool("get_training_detail", {"training_id": 0})
             assert result.is_error is True

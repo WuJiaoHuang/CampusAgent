@@ -7,7 +7,7 @@ CampusAgent 是独立的 Python 智能课程客服 Agent 项目。CampusTrain �
 
 当前已完成工程初始化、第二步运行环境核查和第三步知识库资料整理。首页可离线启动；第二步增加了异步
 CampusTrain Gateway 客户端和真实只读接口联调。已实现本地 RAG 知识库和 MCP 只读工具层，
-已实现本地 RAG、八个 MCP 工具及 Stage 6/7 的 FastAPI + DeepSeek Tool Calling + LangGraph ReAct 工作流；
+已实现本地 RAG、九个 MCP 工具及 Stage 6/7 的 FastAPI + DeepSeek Tool Calling + LangGraph ReAct 工作流；
 不实现 CampusTrain 业务数据库操作。
 
 ## 技术方案与目录
@@ -277,7 +277,7 @@ uv run --locked python -m campus_agent
 
 请求示例：`Invoke-RestMethod http://localhost:8000/agent/chat -Method Post -Headers @{Authorization="Bearer <JWT>"} -ContentType 'application/json' -Body '{"message":"查询培训16001详情","session_id":"demo"}'`。
 
-应用 lifespan 会加载一次 BGE/Chroma、发现八个 MCP stdio 工具，并初始化/关闭
+应用 lifespan 会加载一次 BGE/Chroma、发现九个 MCP stdio 工具，并初始化/关闭
 `AsyncSqliteSaver`。知识索引为空时先执行：
 
 ```powershell
@@ -324,7 +324,8 @@ HTTP 请求都会重新计数，默认最多 4 次工具调用和 4 次 LLM 决�
 工具异常以及超过额度的工具调用都生成匹配 `tool_call_id` 的 `ToolMessage`，不会留下不完整的 Tool Calling
 消息序列。
 
-MCP Server 现注册八个工具：六个只读查询工具，以及 `create_enrollment(training_id)` 和
+MCP Server 现注册九个工具：七个只读查询工具（包含按标题定位真实培训的
+`search_trainings(title, page, size, status)`），以及 `create_enrollment(training_id)` 和
 `cancel_enrollment(enrollment_id)`。写工具只能经如下四阶段执行：
 
 ```text
