@@ -205,7 +205,16 @@ def test_http_confirmation_executes_frozen_write_only_after_approval(monkeypatch
             )
 
     async def mine(page: int = 1, size: int = 100):
-        return {"ok": True, "data": {"records": list(records), "page": page, "size": size}}
+        return {
+            "ok": True,
+            "data": {
+                "records": list(records),
+                "page": page,
+                "size": size,
+                "total": len(records),
+                "pages": 1,
+            },
+        }
 
     async def detail(training_id: int):
         return {"ok": True, "data": {"id": training_id}}

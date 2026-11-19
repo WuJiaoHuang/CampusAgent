@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
@@ -25,7 +27,16 @@ def _decoder(token):
 
 def _tools(records, writes):
     async def mine(page: int = 1, size: int = 100):
-        return {"ok": True, "data": {"records": list(records), "page": page, "size": size}}
+        return {
+            "ok": True,
+            "data": {
+                "records": list(records),
+                "page": page,
+                "size": size,
+                "total": len(records),
+                "pages": 1,
+            },
+        }
 
     async def detail(training_id: int):
         return {"ok": True, "data": {"id": training_id, "title": "测试培训"}}
@@ -63,6 +74,13 @@ async def test_create_requires_interrupt_confirmation_and_verifies(tmp_path):
     assert pending["pending_action"]["tool_name"] == "create_enrollment"
     assert pending["pending_action"]["arguments"] == {"training_id": 7}
     assert writes == []
+    blocked_chat = await service.chat("查询其他课程", "session-a", "user-a")
+    assert blocked_chat["status"] == "pending_confirmation"
+    assert (
+        blocked_chat["pending_action"]["operation_id"]
+        == pending["pending_action"]["operation_id"]
+    )
+    assert writes == []
     with pytest.raises(ValueError):
         await service.confirm(
             "session-a", "user-b", pending["pending_action"]["operation_id"], True
@@ -76,15 +94,15 @@ async def test_create_requires_interrupt_confirmation_and_verifies(tmp_path):
         jwt_decoder=_decoder,
     )
     await restarted.start()
-    completed = await restarted.confirm(
-        "session-a", "user-a", pending["pending_action"]["operation_id"], True
+    results = await asyncio.gather(
+        restarted.confirm("session-a", "user-a", pending["pending_action"]["operation_id"], True),
+        restarted.confirm("session-a", "user-a", pending["pending_action"]["operation_id"], True),
+        return_exceptions=True,
     )
+    completed = next(item for item in results if isinstance(item, dict))
     assert completed["answer"] == "操作已完成并核验成功。"
     assert writes == [7]
-    with pytest.raises(RuntimeError):
-        await restarted.confirm(
-            "session-a", "user-a", pending["pending_action"]["operation_id"], True
-        )
+    assert sum(isinstance(item, RuntimeError) for item in results) == 1
     await restarted.close()
 
 
@@ -207,4 +225,102 @@ async def test_rag_context_is_ephemeral_reference_for_decision(tmp_path):
     response = await service.chat("报名规则", "rag", "user-a")
     assert response["citations"][0]["source_refs"] == ["EnrollmentServiceImpl"]
     assert any("报名规则事实" in str(message.content) for message in seen)
+    await service.close()
+
+
+@pytest.mark.anyio
+async def test_prepare_fails_closed_when_enrollment_lookup_fails(tmp_path):
+    writes = []
+
+    async def failed_mine(page: int = 1, size: int = 100):
+        return {"ok": False, "error": {"type": "CampusHttpError"}}
+
+    async def detail(training_id: int):
+        return {"ok": True, "data": {"id": training_id}}
+
+    async def create(training_id: int):
+        writes.append(training_id)
+        return {"ok": True, "data": {"enrollment_id": 1}}
+
+    service = AgentService(
+        Settings(sqlite_path=tmp_path / "failed-prepare.sqlite3"),
+        llm=CreateEnrollmentLlm(),
+        tools={
+            "get_my_enrollments": StructuredTool.from_function(
+                coroutine=failed_mine, name="get_my_enrollments", description="报名记录"
+            ),
+            "get_training_detail": StructuredTool.from_function(
+                coroutine=detail, name="get_training_detail", description="培训详情"
+            ),
+            "create_enrollment": StructuredTool.from_function(
+                coroutine=create, name="create_enrollment", description="创建报名"
+            ),
+        },
+        jwt_decoder=_decoder,
+    )
+    await service.start()
+    response = await service.chat("报名培训 7", "failed-prepare", "user-a")
+    assert response["answer"] == "无法准备操作：ToolResultError"
+    assert "pending_action" not in response
+    assert writes == []
+    await service.close()
+
+
+@pytest.mark.anyio
+async def test_prepare_scans_all_pages_before_declaring_no_active_enrollment(tmp_path):
+    records = [
+        {"enrollmentId": index, "trainingId": index, "status": 1}
+        for index in range(1, 101)
+    ] + [{"enrollmentId": 101, "trainingId": 777, "status": 1}]
+    calls = []
+
+    async def mine(page: int = 1, size: int = 100):
+        calls.append(page)
+        start = (page - 1) * size
+        return {
+            "ok": True,
+            "data": {
+                "records": records[start : start + size],
+                "total": len(records),
+                "pages": 2,
+            },
+        }
+
+    async def detail(training_id: int):
+        return {"ok": True, "data": {"id": training_id}}
+
+    class ExistingEnrollmentLlm:
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, _messages):
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "create-existing",
+                        "name": "create_enrollment",
+                        "args": {"training_id": 777},
+                    }
+                ],
+            )
+
+    service = AgentService(
+        Settings(sqlite_path=tmp_path / "pagination.sqlite3"),
+        llm=ExistingEnrollmentLlm(),
+        tools={
+            "get_my_enrollments": StructuredTool.from_function(
+                coroutine=mine, name="get_my_enrollments", description="报名记录"
+            ),
+            "get_training_detail": StructuredTool.from_function(
+                coroutine=detail, name="get_training_detail", description="培训详情"
+            ),
+        },
+        jwt_decoder=_decoder,
+    )
+    await service.start()
+    response = await service.chat("报名培训 7", "pagination", "user-a")
+    assert response["answer"] == "无法准备操作：ValueError"
+    assert "pending_action" not in response
+    assert calls == [1, 2]
     await service.close()

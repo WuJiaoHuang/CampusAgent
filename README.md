@@ -338,6 +338,11 @@ Prepare 会冻结工具名和参数，并通过当前用户的报名记录核验
 操作 ID 约束；状态转移 `PREPARED → CONFIRMED → EXECUTING` 防止重复确认。写入超时或结果不明确会标为待核实，
 不会自动重试。Verify 重新读取我的报名记录：创建须存在有效报名，取消须为 `CANCELLED(0)`。
 
+写入前置检查和核验都会先验证 MCP 返回的 `ok: true`，不会把 Gateway 或业务错误当作空报名列表。报名记录按
+`total`、`records` 和可选 `pages` 可靠分页读取，最多 100 页；分页字段异常、总数变化或查询失败时 fail closed，
+不会准备或重试写操作。每个认证用户会话在单一 FastAPI 进程内由 `asyncio.Lock` 串行化；SQLite 条件更新提供
+跨进程的操作状态防重，但不承诺多进程的会话消息完全串行。
+
 ```powershell
 # 发起可能写入的请求后，先检查 status 和 pending_action，不会立即写入
 Invoke-RestMethod http://localhost:8000/agent/chat -Method Post `
@@ -352,3 +357,10 @@ Invoke-RestMethod http://localhost:8000/agent/confirm -Method Post `
 
 RAG 仍使用 BGE + Chroma。`retrieve` 的结果作为单次模型决策的低优先级、非持久化参考消息，并同时返回 citations；
 `search_knowledge` 仍可由模型自主调用。外部检索内容不写入 System Message、JWT 或 Checkpoint。
+
+### Stage 7 最终验收（2026-11-19）
+
+在 Windows 本机启动 CampusTrain 八个 Java 单实例、复用 VM 基础设施后，真实登录、DeepSeek Flash、BGE/Chroma、
+MCP stdio、Gateway 和 SQLite 会话链路均已验收。真实对话验证了报名列表、课程规则 RAG、第二门课程指代和
+学习进度；在专用测试培训上，创建报名经确认后核验为 `ENROLLED(1)`，再经确认取消并核验为 `CANCELLED(0)`，
+重复确认返回 HTTP 409。测试结束后停止了本轮启动的本地 Java 与 Agent 进程，未停止 VM 基础设施。

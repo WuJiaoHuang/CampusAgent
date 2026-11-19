@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Mapping
 from contextvars import ContextVar
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import Command, interrupt
@@ -13,6 +15,15 @@ from campus_agent.agent.actions import PendingActionStore
 from campus_agent.agent.memory import ConversationMemory
 
 WRITE_TOOLS = frozenset({"create_enrollment", "cancel_enrollment"})
+ENROLLMENT_PAGE_SIZE = 100
+MAX_ENROLLMENT_PAGES = 100
+AGENT_POLICY = """你是 CampusAgent。对于实时业务数据必须调用工具，不能编造 ID 或结果。
+用户明确要求发起报名或取消报名时，调用对应的写工具以交给服务端 Prepare–Confirm 流程；
+写工具不会直接执行。不要把普通聊天文本当成确认，也不要声称已写入，除非工具结果已返回。"""
+
+
+class ToolResultError(ValueError):
+    """A prerequisite tool failed or returned an unsafe response shape."""
 
 
 class AgentState(MessagesState, total=False):
@@ -36,6 +47,8 @@ class AgentService:
         self.actions: PendingActionStore | None = None
         self._request_user_id: ContextVar[str] = ContextVar("agent_user_id", default="")
         self._request_thread_id: ContextVar[str] = ContextVar("agent_thread_id", default="")
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._session_locks_guard = asyncio.Lock()
         self._graph_builder = StateGraph(AgentState)
         self._graph_builder.add_node("retrieve", self._retrieve)
         self._graph_builder.add_node("decide", self._decide)
@@ -94,36 +107,44 @@ class AgentService:
 
     async def chat(self, message: str, session_id: str, jwt: str) -> dict[str, Any]:
         user_id, thread_id = self._identity(jwt, session_id)
-        state = await self._invoke(
-            {"messages": [HumanMessage(content=message)], **self._request_reset()},
-            thread_id,
-            user_id,
-            jwt,
-        )
-        return self._response(state, session_id)
+        async with await self._session_lock(thread_id):
+            pending = self._actions().get_pending(thread_id, user_id)
+            if pending:
+                return self._pending_response(pending, session_id)
+            state = await self._invoke(
+                {"messages": [HumanMessage(content=message)], **self._request_reset()},
+                thread_id,
+                user_id,
+                jwt,
+            )
+            return self._response(state, session_id)
 
     async def confirm(
         self, session_id: str, jwt: str, operation_id: str, approved: bool
     ) -> dict[str, Any]:
         user_id, thread_id = self._identity(jwt, session_id)
-        actions = self._actions()
-        action = actions.get(operation_id, thread_id, user_id)
-        if action is None:
-            raise ValueError("待确认操作不存在或不属于当前用户")
-        changed = (
-            actions.approve(operation_id, thread_id, user_id)
-            if approved
-            else actions.reject(operation_id, thread_id, user_id)
-        )
-        if not changed:
-            raise RuntimeError("操作已处理或状态已变化")
-        state = await self._invoke(
-            Command(resume={"operation_id": operation_id, "approved": approved}),
-            thread_id,
-            user_id,
-            jwt,
-        )
-        return self._response(state, session_id)
+        async with await self._session_lock(thread_id):
+            actions = self._actions()
+            action = actions.get(operation_id, thread_id, user_id)
+            if action is None:
+                raise ValueError("待确认操作不存在或不属于当前用户")
+            if action["status"] == "PREPARED":
+                changed = (
+                    actions.approve(operation_id, thread_id, user_id)
+                    if approved
+                    else actions.reject(operation_id, thread_id, user_id)
+                )
+                if not changed:
+                    raise RuntimeError("操作状态已变化")
+            elif action["status"] != "CONFIRMED" or not approved:
+                raise RuntimeError("操作已处理或状态已变化")
+            state = await self._invoke(
+                Command(resume={"operation_id": operation_id, "approved": approved}),
+                thread_id,
+                user_id,
+                jwt,
+            )
+            return self._response(state, session_id)
 
     async def _invoke(self, payload: Any, thread_id: str, user_id: str, jwt: str) -> AgentState:
         if self.graph is None:
@@ -164,6 +185,11 @@ class AgentService:
             raise RuntimeError("操作存储尚未初始化")
         return self.actions
 
+    async def _session_lock(self, thread_id: str) -> asyncio.Lock:
+        """Serialize one local thread; SQLite guards cross-process action transitions."""
+        async with self._session_locks_guard:
+            return self._session_locks.setdefault(thread_id, asyncio.Lock())
+
     @staticmethod
     def _latest_human_message(messages: list[BaseMessage]) -> HumanMessage:
         for message in reversed(messages):
@@ -201,6 +227,17 @@ class AgentService:
             ),
         }
 
+    @staticmethod
+    def _pending_response(action: dict[str, Any], session_id: str) -> dict[str, Any]:
+        return {
+            "answer": "当前会话有待处理的确认操作，请先明确确认或拒绝。",
+            "session_id": session_id,
+            "tool_calls": [],
+            "citations": [],
+            "status": "pending_confirmation",
+            "pending_action": action,
+        }
+
     async def _retrieve(self, state: AgentState) -> dict[str, Any]:
         if not self.rag:
             return {"context": []}
@@ -216,7 +253,7 @@ class AgentService:
             limited = AIMessage(content="本次请求的工具决策次数已达到上限，请缩小问题后重试。")
             return {"messages": [limited], "tool_calls": [], "decision_rounds": rounds}
         model = self.llm.bind_tools(list(self.tools.values())) if self.tools else self.llm
-        messages = list(state["messages"])
+        messages = [SystemMessage(content=AGENT_POLICY), *state["messages"]]
         if context := state.get("context"):
             # Retrieval is deliberately an ephemeral, low-priority reference
             # message, not a persisted SystemMessage containing external text.
@@ -294,8 +331,7 @@ class AgentService:
         return {"pending_action": action, "pending_call": {}}
 
     async def _prepare_summary(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        enrollments = await self._call_tool("get_my_enrollments", {"page": 1, "size": 100})
-        records = enrollments.get("data", {}).get("records", [])
+        records = await self._all_enrollments()
         if name == "create_enrollment":
             training_id = args.get("training_id")
             if not isinstance(training_id, int) or training_id <= 0:
@@ -305,11 +341,14 @@ class AgentService:
                 for item in records
             ):
                 raise ValueError("该培训已有有效报名")
-            detail = await self._call_tool("get_training_detail", {"training_id": training_id})
+            detail = self._tool_data(
+                await self._call_tool("get_training_detail", {"training_id": training_id}),
+                "get_training_detail",
+            )
             return {
                 "operation": "create_enrollment",
                 "training_id": training_id,
-                "training": detail.get("data", {}),
+                "training": detail,
             }
         enrollment_id = args.get("enrollment_id")
         if not isinstance(enrollment_id, int) or enrollment_id <= 0:
@@ -373,9 +412,7 @@ class AgentService:
             message = "操作未成功执行；未对不明确的写操作自动重试。"
             return {"messages": [AIMessage(content=message)], "answer": message}
         try:
-            records = (await self._call_tool("get_my_enrollments", {"page": 1, "size": 100})).get(
-                "data", {}
-            ).get("records", [])
+            records = await self._all_enrollments()
             if action["tool_name"] == "create_enrollment":
                 verified = any(
                     item.get("trainingId") == action["arguments"]["training_id"]
@@ -388,7 +425,7 @@ class AgentService:
                     and item.get("status") == 0
                     for item in records
                 )
-        except Exception:
+        except ToolResultError:
             verified = False
         status = "SUCCEEDED" if verified else "UNCERTAIN"
         verification = {"result": result, "verified": verified}
@@ -404,6 +441,49 @@ class AgentService:
         if not isinstance(result, dict):
             raise ValueError("工具返回不是对象")
         return result
+
+    @staticmethod
+    def _tool_data(result: dict[str, Any], tool_name: str) -> Mapping[str, Any]:
+        if result.get("ok") is not True:
+            raise ToolResultError(f"{tool_name} 调用失败")
+        data = result.get("data")
+        if not isinstance(data, Mapping):
+            raise ToolResultError(f"{tool_name} 返回 data 不是对象")
+        return data
+
+    async def _all_enrollments(self) -> list[Mapping[str, Any]]:
+        """Read every enrollment page or fail closed when pagination is inconsistent."""
+        records: list[Mapping[str, Any]] = []
+        total: int | None = None
+        for page in range(1, MAX_ENROLLMENT_PAGES + 1):
+            response = await self._call_tool(
+                "get_my_enrollments", {"page": page, "size": ENROLLMENT_PAGE_SIZE}
+            )
+            data = self._tool_data(response, "get_my_enrollments")
+            page_records = data.get("records")
+            if not isinstance(page_records, list) or not all(
+                isinstance(item, Mapping) for item in page_records
+            ):
+                raise ToolResultError("报名列表 records 结构异常")
+            page_total = data.get("total")
+            if isinstance(page_total, bool) or not isinstance(page_total, int) or page_total < 0:
+                raise ToolResultError("报名列表 total 结构异常")
+            if total is None:
+                total = page_total
+            elif total != page_total:
+                raise ToolResultError("报名列表 total 在分页期间变化")
+            records.extend(page_records)
+            if len(records) >= total:
+                return records[:total]
+            pages = data.get("pages")
+            if pages is not None:
+                if isinstance(pages, bool) or not isinstance(pages, int) or pages < page:
+                    raise ToolResultError("报名列表 pages 结构异常")
+                if page >= pages:
+                    raise ToolResultError("报名列表未返回全部记录")
+            elif len(page_records) < ENROLLMENT_PAGE_SIZE:
+                raise ToolResultError("报名列表未返回全部记录")
+        raise ToolResultError("报名记录分页超过安全上限")
 
     async def _answer(self, state: AgentState) -> dict[str, Any]:
         if state.get("answer"):

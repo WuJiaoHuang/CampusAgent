@@ -12,7 +12,7 @@ class PendingActionStore:
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection = sqlite3.connect(path, check_same_thread=False, timeout=5)
         self._connection.execute(
             "CREATE TABLE IF NOT EXISTS pending_actions ("
             "operation_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, user_id TEXT NOT NULL, "
@@ -55,7 +55,8 @@ class PendingActionStore:
 
     def get(self, operation_id: str, thread_id: str, user_id: str) -> dict[str, Any] | None:
         row = self._connection.execute(
-            "SELECT tool_name,arguments_json,summary_json,status,result_json FROM pending_actions "
+            "SELECT tool_name,arguments_json,summary_json,status,result_json,created_at "
+            "FROM pending_actions "
             "WHERE operation_id=? AND thread_id=? AND user_id=?",
             (operation_id, thread_id, user_id),
         ).fetchone()
@@ -68,7 +69,16 @@ class PendingActionStore:
             **json.loads(row[2]),
             "status": row[3],
             "result": json.loads(row[4]) if row[4] else None,
+            "created_at": row[5],
         }
+
+    def get_pending(self, thread_id: str, user_id: str) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            "SELECT operation_id FROM pending_actions WHERE thread_id=? AND user_id=? "
+            "AND status IN ('PREPARED','CONFIRMED','EXECUTING') ORDER BY created_at DESC LIMIT 1",
+            (thread_id, user_id),
+        ).fetchone()
+        return self.get(row[0], thread_id, user_id) if row else None
 
     def approve(self, operation_id: str, thread_id: str, user_id: str) -> bool:
         cursor = self._connection.execute(
