@@ -115,12 +115,14 @@ class PendingActionStore:
         status: str,
         result: dict[str, Any],
     ) -> None:
-        self._connection.execute(
+        cursor = self._connection.execute(
             "UPDATE pending_actions SET status=?,result_json=?,updated_at=CURRENT_TIMESTAMP "
             "WHERE operation_id=? AND thread_id=? AND user_id=?",
             (status, json.dumps(result, ensure_ascii=False), operation_id, thread_id, user_id),
         )
         self._connection.commit()
+        if cursor.rowcount != 1:
+            raise RuntimeError("操作状态持久化失败")
 
     def close(self) -> None:
         self._connection.close()

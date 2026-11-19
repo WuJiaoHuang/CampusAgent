@@ -151,6 +151,51 @@ async def test_cancel_rejection_never_calls_write_tool(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_cancel_confirmation_still_verifies_cancelled_state(tmp_path):
+    records, writes = [{"enrollmentId": 71, "trainingId": 7, "status": 1}], []
+
+    class CancelLlm:
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, _messages):
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "cancel-success",
+                        "name": "cancel_enrollment",
+                        "args": {"enrollment_id": 71},
+                    }
+                ],
+            )
+
+    async def cancel(enrollment_id: int):
+        writes.append(enrollment_id)
+        records[0]["status"] = 0
+        return {"ok": True, "data": {}}
+
+    tools = _tools(records, writes)
+    tools["cancel_enrollment"] = StructuredTool.from_function(
+        coroutine=cancel, name="cancel_enrollment", description="取消报名"
+    )
+    service = AgentService(
+        Settings(sqlite_path=tmp_path / "cancel-success.sqlite3"),
+        llm=CancelLlm(),
+        tools=tools,
+        jwt_decoder=_decoder,
+    )
+    await service.start()
+    pending = await service.chat("取消报名", "cancel-success", "user-a")
+    completed = await service.confirm(
+        "cancel-success", "user-a", pending["pending_action"]["operation_id"], True
+    )
+    assert completed["answer"] == "操作已完成并核验成功。"
+    assert writes == [71]
+    await service.close()
+
+
+@pytest.mark.anyio
 async def test_react_runs_two_decision_rounds_and_matches_tool_messages(tmp_path):
     seen = []
 
@@ -323,4 +368,132 @@ async def test_prepare_scans_all_pages_before_declaring_no_active_enrollment(tmp
     assert response["answer"] == "无法准备操作：ValueError"
     assert "pending_action" not in response
     assert calls == [1, 2]
+    await service.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("verification_outcome", "expected_error_type"),
+    [
+        ("exception", "RuntimeError"),
+        ("business_error", "CampusHttpError"),
+        ("malformed", "ToolResultError"),
+    ],
+)
+async def test_verification_failure_marks_operation_uncertain(
+    tmp_path, verification_outcome, expected_error_type
+):
+    records, writes, mine_calls = [], [], 0
+
+    async def mine(page: int = 1, size: int = 100):
+        nonlocal mine_calls
+        mine_calls += 1
+        if mine_calls > 1:
+            if verification_outcome == "exception":
+                raise RuntimeError("gateway unavailable")
+            if verification_outcome == "business_error":
+                return {"ok": False, "error": {"type": "CampusHttpError"}}
+            return {"ok": True, "data": {"records": "invalid", "total": 0, "pages": 1}}
+        return {
+            "ok": True,
+            "data": {"records": records, "total": 0, "pages": 1, "page": page, "size": size},
+        }
+
+    async def detail(training_id: int):
+        return {"ok": True, "data": {"id": training_id}}
+
+    async def create(training_id: int):
+        writes.append(training_id)
+        return {"ok": True, "data": {"enrollment_id": 71}}
+
+    service = AgentService(
+        Settings(sqlite_path=tmp_path / f"verify-{verification_outcome}.sqlite3"),
+        llm=CreateEnrollmentLlm(),
+        tools={
+            "get_my_enrollments": StructuredTool.from_function(
+                coroutine=mine, name="get_my_enrollments", description="报名记录"
+            ),
+            "get_training_detail": StructuredTool.from_function(
+                coroutine=detail, name="get_training_detail", description="培训详情"
+            ),
+            "create_enrollment": StructuredTool.from_function(
+                coroutine=create, name="create_enrollment", description="创建报名"
+            ),
+        },
+        jwt_decoder=_decoder,
+    )
+    await service.start()
+    pending = await service.chat("报名", f"verify-{verification_outcome}", "user-a")
+    result = await service.confirm(
+        f"verify-{verification_outcome}", "user-a", pending["pending_action"]["operation_id"], True
+    )
+    assert result["answer"] == "操作结果待核实；系统不会自动重试。"
+    action = service.actions.get(
+        pending["pending_action"]["operation_id"],
+        service._identity("user-a", f"verify-{verification_outcome}")[1],
+        "1",
+    )
+    assert action["status"] == "UNCERTAIN"
+    assert action["result"]["error_type"] == expected_error_type
+    assert writes == [7]
+    await service.close()
+
+
+@pytest.mark.anyio
+async def test_checkpoint_mismatch_marks_confirmed_operation_uncertain(tmp_path):
+    records, writes = [], []
+    service = AgentService(
+        Settings(sqlite_path=tmp_path / "mismatch.sqlite3"),
+        llm=CreateEnrollmentLlm(),
+        tools=_tools(records, writes),
+        jwt_decoder=_decoder,
+    )
+    await service.start()
+    thread_id = service._identity("user-a", "mismatch")[1]
+    action = service.actions.create(
+        thread_id=thread_id,
+        user_id="1",
+        tool_name="create_enrollment",
+        arguments={"training_id": 7},
+        summary={"operation": "create_enrollment", "before_enrollment": None},
+    )
+    assert service.actions.approve(action["operation_id"], thread_id, "1")
+    blocked = await service.chat("继续", "mismatch", "user-a")
+    assert blocked["answer"] == "操作已确认但尚未恢复执行，请使用原 operation ID 再次明确确认。"
+    assert writes == []
+    with pytest.raises(RuntimeError, match="待核实"):
+        await service.confirm("mismatch", "user-a", action["operation_id"], True)
+    stored = service.actions.get(action["operation_id"], thread_id, "1")
+    assert stored["status"] == "UNCERTAIN"
+    assert writes == []
+    await service.close()
+
+
+@pytest.mark.anyio
+async def test_executing_recovery_only_reads_and_unblocks_next_chat(tmp_path):
+    records, writes = [], []
+    service = AgentService(
+        Settings(sqlite_path=tmp_path / "executing.sqlite3"),
+        llm=None,
+        tools=_tools(records, writes),
+        jwt_decoder=_decoder,
+    )
+    await service.start()
+    thread_id = service._identity("user-a", "executing")[1]
+    action = service.actions.create(
+        thread_id=thread_id,
+        user_id="1",
+        tool_name="create_enrollment",
+        arguments={"training_id": 7},
+        summary={"operation": "create_enrollment", "before_enrollment": None},
+    )
+    assert service.actions.approve(action["operation_id"], thread_id, "1")
+    assert service.actions.begin_execution(action["operation_id"], thread_id, "1")
+    recovered = await service.chat("继续", "executing", "user-a")
+    assert recovered["answer"] == "遗留操作结果待核实，未自动重试写入。"
+    assert writes == []
+    stored = service.actions.get(action["operation_id"], thread_id, "1")
+    assert stored["status"] == "UNCERTAIN"
+    next_chat = await service.chat("新问题", "executing", "user-a")
+    assert next_chat["answer"] == "我可以帮助查询课程、报名和学习进度。"
     await service.close()

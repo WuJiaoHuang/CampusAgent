@@ -25,6 +25,10 @@ AGENT_POLICY = """你是 CampusAgent。对于实时业务数据必须调用工�
 class ToolResultError(ValueError):
     """A prerequisite tool failed or returned an unsafe response shape."""
 
+    def __init__(self, message: str, error_type: str = "ToolResultError") -> None:
+        super().__init__(message)
+        self.error_type = error_type
+
 
 class AgentState(MessagesState, total=False):
     """Messages are persisted with LangGraph's ``add_messages`` reducer."""
@@ -106,10 +110,16 @@ class AgentService:
         return user_id, ConversationMemory.user_key(user_id, session_id)
 
     async def chat(self, message: str, session_id: str, jwt: str) -> dict[str, Any]:
+        if self.graph is None:
+            await self.start()
         user_id, thread_id = self._identity(jwt, session_id)
         async with await self._session_lock(thread_id):
             pending = self._actions().get_pending(thread_id, user_id)
             if pending:
+                if pending["status"] == "EXECUTING":
+                    return await self._recover_executing(
+                        pending, session_id, user_id, thread_id, jwt
+                    )
                 return self._pending_response(pending, session_id)
             state = await self._invoke(
                 {"messages": [HumanMessage(content=message)], **self._request_reset()},
@@ -122,12 +132,27 @@ class AgentService:
     async def confirm(
         self, session_id: str, jwt: str, operation_id: str, approved: bool
     ) -> dict[str, Any]:
+        if self.graph is None:
+            await self.start()
         user_id, thread_id = self._identity(jwt, session_id)
         async with await self._session_lock(thread_id):
             actions = self._actions()
             action = actions.get(operation_id, thread_id, user_id)
             if action is None:
                 raise ValueError("待确认操作不存在或不属于当前用户")
+            if action["status"] not in {"PREPARED", "CONFIRMED"}:
+                raise RuntimeError("操作已处理或状态已变化")
+            if action["status"] == "CONFIRMED" and not approved:
+                raise RuntimeError("操作已处理或状态已变化")
+            if not await self._checkpoint_matches_pending(thread_id, operation_id):
+                self._mark_uncertain(
+                    action,
+                    thread_id,
+                    user_id,
+                    "checkpoint_mismatch",
+                    "无法证明原确认中断仍可安全恢复",
+                )
+                raise RuntimeError("确认上下文无法安全恢复，操作结果待核实")
             if action["status"] == "PREPARED":
                 changed = (
                     actions.approve(operation_id, thread_id, user_id)
@@ -136,8 +161,6 @@ class AgentService:
                 )
                 if not changed:
                     raise RuntimeError("操作状态已变化")
-            elif action["status"] != "CONFIRMED" or not approved:
-                raise RuntimeError("操作已处理或状态已变化")
             state = await self._invoke(
                 Command(resume={"operation_id": operation_id, "approved": approved}),
                 thread_id,
@@ -229,8 +252,13 @@ class AgentService:
 
     @staticmethod
     def _pending_response(action: dict[str, Any], session_id: str) -> dict[str, Any]:
+        message = (
+            "操作已确认但尚未恢复执行，请使用原 operation ID 再次明确确认。"
+            if action["status"] == "CONFIRMED"
+            else "当前会话有待处理的确认操作，请先明确确认或拒绝。"
+        )
         return {
-            "answer": "当前会话有待处理的确认操作，请先明确确认或拒绝。",
+            "answer": message,
             "session_id": session_id,
             "tool_calls": [],
             "citations": [],
@@ -336,10 +364,10 @@ class AgentService:
             training_id = args.get("training_id")
             if not isinstance(training_id, int) or training_id <= 0:
                 raise ValueError("training_id 必须是正整数")
-            if any(
-                item.get("trainingId") == training_id and item.get("status") == 1
-                for item in records
-            ):
+            existing = next(
+                (item for item in records if item.get("trainingId") == training_id), None
+            )
+            if existing and existing.get("status") == 1:
                 raise ValueError("该培训已有有效报名")
             detail = self._tool_data(
                 await self._call_tool("get_training_detail", {"training_id": training_id}),
@@ -349,6 +377,7 @@ class AgentService:
                 "operation": "create_enrollment",
                 "training_id": training_id,
                 "training": detail,
+                "before_enrollment": dict(existing) if existing else None,
             }
         enrollment_id = args.get("enrollment_id")
         if not isinstance(enrollment_id, int) or enrollment_id <= 0:
@@ -356,7 +385,11 @@ class AgentService:
         target = next((item for item in records if item.get("enrollmentId") == enrollment_id), None)
         if not target or target.get("status") != 1:
             raise ValueError("报名不存在、非当前用户所有，或已取消")
-        return {"operation": "cancel_enrollment", "enrollment": target}
+        return {
+            "operation": "cancel_enrollment",
+            "enrollment": target,
+            "before_enrollment": dict(target),
+        }
 
     def _route_after_prepare(self, state: AgentState) -> str:
         return "confirm" if state.get("pending_action") else "answer"
@@ -396,9 +429,10 @@ class AgentService:
         except Exception as exc:
             result = {
                 "ok": False,
+                "uncertain": True,
                 "error": {"type": type(exc).__name__, "message": "write result unknown"},
             }
-            actions.finish(operation_id, thread_id, user_id, "UNKNOWN", result)
+            actions.finish(operation_id, thread_id, user_id, "UNCERTAIN", result)
             return {"write_result": result}
         if result.get("ok") is not True:
             actions.finish(operation_id, thread_id, user_id, "FAILED", result)
@@ -409,26 +443,19 @@ class AgentService:
         operation_id = action["operation_id"]
         user_id, thread_id = self._request_user_id.get(), self._request_thread_id.get()
         if result.get("ok") is not True:
+            if result.get("uncertain") is True:
+                message = "操作结果待核实；系统不会自动重试。"
+                return {"messages": [AIMessage(content=message)], "answer": message}
             message = "操作未成功执行；未对不明确的写操作自动重试。"
             return {"messages": [AIMessage(content=message)], "answer": message}
-        try:
-            records = await self._all_enrollments()
-            if action["tool_name"] == "create_enrollment":
-                verified = any(
-                    item.get("trainingId") == action["arguments"]["training_id"]
-                    and item.get("status") == 1
-                    for item in records
-                )
-            else:
-                verified = any(
-                    item.get("enrollmentId") == action["arguments"]["enrollment_id"]
-                    and item.get("status") == 0
-                    for item in records
-                )
-        except ToolResultError:
-            verified = False
+        verified, reason, error_type = await self._verify_action(action)
         status = "SUCCEEDED" if verified else "UNCERTAIN"
-        verification = {"result": result, "verified": verified}
+        verification = {
+            "result": result,
+            "verified": verified,
+            "reason": reason,
+            **({"error_type": error_type} if error_type else {}),
+        }
         self._actions().finish(operation_id, thread_id, user_id, status, verification)
         message = "操作已完成并核验成功。" if verified else "操作结果待核实；系统不会自动重试。"
         return {"messages": [AIMessage(content=message)], "answer": message}
@@ -437,19 +464,112 @@ class AgentService:
         tool = self.tools.get(name)
         if tool is None:
             raise ValueError(f"缺少工具: {name}")
-        result = await tool.ainvoke(args)
+        try:
+            result = await tool.ainvoke(args)
+        except (ConnectionError, OSError, RuntimeError, TimeoutError) as exc:
+            raise ToolResultError("工具调用异常", type(exc).__name__) from exc
         if not isinstance(result, dict):
-            raise ValueError("工具返回不是对象")
+            raise ToolResultError("工具返回不是对象")
         return result
 
     @staticmethod
     def _tool_data(result: dict[str, Any], tool_name: str) -> Mapping[str, Any]:
         if result.get("ok") is not True:
-            raise ToolResultError(f"{tool_name} 调用失败")
+            error = result.get("error")
+            error_type = error.get("type") if isinstance(error, Mapping) else None
+            raise ToolResultError(f"{tool_name} 调用失败", str(error_type or "ToolResultError"))
         data = result.get("data")
         if not isinstance(data, Mapping):
             raise ToolResultError(f"{tool_name} 返回 data 不是对象")
         return data
+
+    async def _verify_action(
+        self, action: Mapping[str, Any]
+    ) -> tuple[bool, str, str | None]:
+        try:
+            records = await self._all_enrollments()
+        except ToolResultError as exc:
+            return False, "verification_lookup_failed", exc.error_type
+        if action["tool_name"] == "create_enrollment":
+            training_id = action["arguments"]["training_id"]
+            before = action.get("before_enrollment")
+            current = next(
+                (item for item in records if item.get("trainingId") == training_id), None
+            )
+            if current and current.get("status") == 1 and (
+                before is None or before.get("status") == 0
+            ):
+                return True, "active_enrollment_observed", None
+            return False, "expected_active_enrollment_not_observed", None
+        enrollment_id = action["arguments"]["enrollment_id"]
+        current = next(
+            (item for item in records if item.get("enrollmentId") == enrollment_id), None
+        )
+        before = action.get("before_enrollment")
+        if current and current.get("status") == 0 and before and before.get("status") == 1:
+            return True, "cancelled_enrollment_observed", None
+        return False, "expected_cancelled_enrollment_not_observed", None
+
+    async def _checkpoint_matches_pending(self, thread_id: str, operation_id: str) -> bool:
+        if self.graph is None:
+            return False
+        snapshot = await self.graph.aget_state({"configurable": {"thread_id": thread_id}})
+        pending = snapshot.values.get("pending_action", {})
+        return pending.get("operation_id") == operation_id and "confirm" in snapshot.next
+
+    async def _recover_executing(
+        self, action: dict[str, Any], session_id: str, user_id: str, thread_id: str, jwt: str
+    ) -> dict[str, Any]:
+        mcp_token = self.mcp_bridge.set_jwt(jwt) if hasattr(self, "mcp_bridge") else None
+        user_token = self._request_user_id.set(user_id)
+        thread_token = self._request_thread_id.set(thread_id)
+        try:
+            verified, reason, error_type = await self._verify_action(action)
+            result = {
+                "result": action.get("result"),
+                "verified": verified,
+                "reason": reason,
+                **({"error_type": error_type} if error_type else {}),
+            }
+            self._actions().finish(
+                action["operation_id"],
+                thread_id,
+                user_id,
+                "SUCCEEDED" if verified else "UNCERTAIN",
+                result,
+            )
+        finally:
+            self._request_user_id.reset(user_token)
+            self._request_thread_id.reset(thread_token)
+            if mcp_token is not None:
+                self.mcp_bridge.reset_jwt(mcp_token)
+        answer = (
+            "遗留操作已通过只读核验确认完成。"
+            if verified
+            else "遗留操作结果待核实，未自动重试写入。"
+        )
+        return {"answer": answer, "session_id": session_id, "tool_calls": [], "citations": []}
+
+    def _mark_uncertain(
+        self,
+        action: Mapping[str, Any],
+        thread_id: str,
+        user_id: str,
+        reason: str,
+        error_type: str,
+    ) -> None:
+        self._actions().finish(
+            action["operation_id"],
+            thread_id,
+            user_id,
+            "UNCERTAIN",
+            {
+                "result": action.get("result"),
+                "verified": False,
+                "reason": reason,
+                "error_type": error_type,
+            },
+        )
 
     async def _all_enrollments(self) -> list[Mapping[str, Any]]:
         """Read every enrollment page or fail closed when pagination is inconsistent."""

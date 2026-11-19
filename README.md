@@ -343,6 +343,13 @@ Prepare 会冻结工具名和参数，并通过当前用户的报名记录核验
 不会准备或重试写操作。每个认证用户会话在单一 FastAPI 进程内由 `asyncio.Lock` 串行化；SQLite 条件更新提供
 跨进程的操作状态防重，但不承诺多进程的会话消息完全串行。
 
+核验阶段的 MCP 连接、网络、业务响应或报名列表结构异常会将已执行的操作保存为 `UNCERTAIN`，同时保留操作 ID、
+冻结参数、写入结果、核验原因和可用错误类型；回复只会说明“结果待核实”，绝不把它报告为成功或自动重试。服务重启后，
+`PREPARED` 仍须由同一用户在同一会话显式确认；`CONFIRMED` 仅在 Checkpoint 仍证明其处于对应 interrupt 时才可恢复，
+否则转为 `UNCERTAIN`；`EXECUTING` 只会进行一次只读核验，能够依据操作前状态可靠确认时结束为 `SUCCEEDED`，否则转为
+`UNCERTAIN`。终态（含 `UNCERTAIN`）不会永久阻塞后续聊天。SQLite 状态条件更新可防止跨进程重复状态转换，但不提供
+外部 HTTP 写操作的 exactly-once 保证，因此任何结果不明确的写入都不能自动重放。
+
 ```powershell
 # 发起可能写入的请求后，先检查 status 和 pending_action，不会立即写入
 Invoke-RestMethod http://localhost:8000/agent/chat -Method Post `
